@@ -1,0 +1,360 @@
+# FastRTMP
+
+[English](README.md) · **简体中文**
+
+[![CI](https://github.com/Hydroxide-OH/FastRTMP/actions/workflows/ci.yml/badge.svg)](https://github.com/Hydroxide-OH/FastRTMP/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macOS-lightgrey)](#部署)
+
+用 Go 从零实现的低延迟、高并发 RTMP 直播服务器。
+
+握手、chunk 分块、AMF0、命令状态机都是自己写的，没有包一层现成 SDK。单个静态二进制、零第三方
+依赖、不转码、不需要外部数据库。OBS 或 ffmpeg 推流，RTMP 或 HTTP-FLV 拉流，自带仪表盘看状态。
+
+![FastRTMP 仪表盘](docs/dashboard.zh-CN.png)
+
+```
+                    ┌───────────────────────────────────────────┐
+  OBS / ffmpeg      │               FastRTMP                    │      RTMP 播放器 (ffplay/VLC)
+  ──── 推流 ───────► │  接入 ──► Stream ──► 扇出 ────────────────┼──►
+                    │            ├── GOP 缓存（秒开）            │      HTTP-FLV（浏览器、ffplay）
+                    │            └── 每观众独立发送队列           ├──►
+                    └───────────────────────────────────────────┘
+```
+
+## 特性
+
+| | |
+| --- | --- |
+| **协议** | RTMP 推流 + 拉流（simple handshake，兼容 OBS、ffmpeg、VLC、硬件编码器） |
+| **低延迟** | 边收边转、不转码、`TCP_NODELAY`；机内中继 **p50 ≈ 0.3ms**，p95 ≈ 1.5ms |
+| **高并发** | 所有观众共享同一份消息缓冲（零拷贝），每人独立队列；500 观众实测 0 掉线 |
+| **秒开** | 每路流缓存 metadata + 编码配置 + 最近一个 GOP，新观众立刻出画面 |
+| **慢客户端保护** | 积压超限的观众被丢到下一个关键帧，绝不拖慢推流端和其他观众 |
+| **HTTP-FLV** | 浏览器（mpegts.js）或 ffplay 直接播放，延迟约 0.5–1s，不需要 WebRTC 信令 |
+| **仪表盘** | 流列表、码率/帧率/分辨率、观众数、页内预览，中英双语可切换 |
+| **运维** | `/api/stats`、`/healthz`、可选 pprof、`-publish-key` / `-play-key` 鉴权 |
+| **部署** | Linux（amd64/arm64）、Windows、macOS 单文件；含 systemd 单元、Dockerfile、交叉编译脚本 |
+
+## 性能实测
+
+Windows 11 笔记本、本机回环，使用自带的 `rtmptest` 压测工具。服务器本身不做缓冲，数字主要反映
+内核网络栈的开销。
+
+| 场景 | p50 | p95 | p99 | 说明 |
+| --- | --- | --- | --- | --- |
+| 1 推流 → 1 观众 | **0.29ms** | 1.5ms | 1.8ms | 30fps，20KB/帧 |
+| 1 推流 → 200 观众 | 3.0ms | 7.1ms | 9.0ms | 聚合 5,916 帧/秒 |
+| 1 推流 → 500 观众 | 8.3ms | 15.7ms | 18.8ms | 聚合 10,761 帧/秒，0 失败 |
+
+500 观众那组压测客户端和服务端在同一台机器上，指标里包含了客户端自身的 CPU 竞争，应当作**上限**看。
+
+### 真实编码器验证
+
+下表的每一行都是实际跑出来的，不是推测：
+
+| 验证项 | 结果 |
+| --- | --- |
+| `ffmpeg ... -f flv rtmp://127.0.0.1:1935/live/ffmpeg`（1080p30 H.264 + AAC） | 推流成功，服务端识别 H.264/AAC、30fps、4.1Mbps |
+| `ffprobe rtmp://.../live/ffmpeg` | `h264 1920x1080 30/1` + `aac` |
+| `ffprobe http://.../flv/live/ffmpeg.flv` | `h264 1920x1080 30/1` + `aac` |
+| `ffmpeg -i <http-flv> -t 6 -f null -` | **零警告、零解码错误** |
+| 从 HTTP-FLV 录 6 秒 | 180 视频帧（正好 30×6）、258 音频帧、时长 6.000s |
+| 从 RTMP 录 5 秒 | 150 视频帧、215 音频帧、时长 5.009s |
+| 推流 `?key=` 缺失/错误 | 被拒（`invalid publish key`）；密钥正确则正常推流 |
+| 观众先连、推流后到 | 推流一上线自动出画面，无需重连 |
+
+## 快速开始
+
+### 编译
+
+```bash
+git clone https://github.com/Hydroxide-OH/FastRTMP.git
+cd FastRTMP
+
+go build -o bin/fastrtmp ./cmd/fastrtmp          # 或 make build
+./bin/fastrtmp -version
+```
+
+一次交叉编译出全部平台（Linux amd64/arm64、Windows、macOS）：
+
+```bash
+./build.sh          # 产物在 dist/
+```
+
+### 启动
+
+```bash
+./bin/fastrtmp                    # RTMP :1935，HTTP :8080
+./bin/fastrtmp -addr :1935 -http :8080 -log-level info
+```
+
+启动横幅会打印所有网卡上可直接使用的地址：
+
+```
+  FastRTMP v1.0.0  ·  low-latency RTMP server
+  ─────────────────────────────────────────────────────────
+  Publish     rtmp://192.168.1.10:1935/live/{stream}
+  Play        rtmp://192.168.1.10:1935/live/{stream}
+  HTTP-FLV    http://192.168.1.10:8080/flv/live/{stream}.flv
+  Dashboard   http://192.168.1.10:8080
+  Health      http://192.168.1.10:8080/healthz
+```
+
+### 推流
+
+**OBS** — 设置 → 直播 → 服务选「自定义…」
+
+- 服务器：`rtmp://<你的IP>:1935/live`
+- 串流密钥：`test`（或任意流名）
+
+**ffmpeg** — 循环推本地文件：
+
+```bash
+ffmpeg -re -stream_loop -1 -i input.mp4 -c copy -f flv rtmp://127.0.0.1:1935/live/test
+```
+
+**ffmpeg** — 低延迟摄像头采集（下面以 Linux `v4l2` 为例，Windows 用 `dshow`，macOS 用 `avfoundation`）：
+
+```bash
+ffmpeg -f v4l2 -i /dev/video0 -f alsa -i default \
+  -c:v libx264 -preset veryfast -tune zerolatency -g 60 -b:v 2500k \
+  -c:a aac -b:a 128k -f flv rtmp://127.0.0.1:1935/live/test
+```
+
+### 拉流
+
+```bash
+# 延迟最低：HTTP-FLV
+ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+  http://127.0.0.1:8080/flv/live/test.flv
+
+# RTMP
+ffplay rtmp://127.0.0.1:1935/live/test
+```
+
+浏览器打开 `http://127.0.0.1:8080`，点「预览」即可播放（mpegts.js + HTTP-FLV）。
+
+## 延迟构成
+
+服务器本身只占不到 1 毫秒，端到端延迟主要来自编码器和播放器：
+
+| 环节 | 典型耗时 | 怎么降 |
+| --- | --- | --- |
+| 编码器 | 100–1000ms | `-tune zerolatency`、关闭 B 帧、GOP 设 1–2 秒 |
+| **FastRTMP** | **< 1ms** | 已经最小化：不转码、无抖动缓冲 |
+| 播放器 | 300–1500ms | ffplay 用 `-fflags nobuffer`；网页用 `liveBufferLatencyChasing` |
+
+RTMP 跑在 TCP 上，网络差的时候会因为重传堆积延迟。如果要在一塌糊涂的公网里做到 200ms 级端到端，
+需要再加一路 WebRTC 输出，这不在本项目范围内。
+
+## 为什么快
+
+1. **零拷贝扇出**：一条媒体消息只分配一次，所有观众共享同一份 payload，各自只持有指针。
+2. **每观众独立队列 + 写协程**：推流协程只负责入队，某个观众的网络卡住不会阻塞推流和其他人。
+3. **丢到关键帧**：观众积压超过 `-queue`（默认 8MB）时清空队列、等下一个关键帧；内存有界，延迟不累积。
+4. **GOP 缓存**：新观众依次收到 metadata → 编码配置 → 关键帧及其后续帧，立即出画面。
+5. **一条消息一次 write**：整条消息拼进一个缓冲区、一次系统调用写出，配合 `TCP_NODELAY` 消除 Nagle 抖动。
+6. **读写分离**：每个连接一个读协程、一个写协程，拼接消息时不会卡住收流。
+7. **fmt=0 块头**：每条消息多 11 字节，换来的是稳定的单条延迟，以及一整类时间戳 delta 的坑被彻底绕开。
+
+## 参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-addr` | `:1935` | RTMP 监听地址（环境变量 `FASTRTMP_ADDR`） |
+| `-http` | `:8080` | 仪表盘与 HTTP-FLV 监听地址，留空禁用（环境变量 `FASTRTMP_HTTP`） |
+| `-chunk-size` | `4096` | 出站 RTMP chunk 大小 |
+| `-queue` | `8MB` | 每观众最大发送积压，超出后丢到下一个关键帧 |
+| `-gop-cache` | `4MB` | 每路流 GOP 缓存上限 |
+| `-read-timeout` | `30s` | 空闲连接超时，`0` 表示不限制 |
+| `-max-conns` | `0` | 最大并发连接数，`0` 不限制 |
+| `-max-viewers` | `0` | 单路流最大观众数，`0` 不限制 |
+| `-publish-key` | – | 推流鉴权密钥，推流地址需带 `?key=`（环境变量 `FASTRTMP_PUBLISH_KEY`） |
+| `-play-key` | – | 播放鉴权密钥，播放地址需带 `?key=`（环境变量 `FASTRTMP_PLAY_KEY`） |
+| `-log-level` | `info` | `debug`、`info`、`warn`、`error` |
+| `-pprof` | – | 开启 pprof，例如 `127.0.0.1:6060` |
+| `-version` | | 打印版本号后退出 |
+
+容量参数支持 `8MB`、`512KB` 或纯字节数。
+
+开启鉴权后密钥直接写在地址里：
+
+```bash
+ffmpeg -re -i input.mp4 -c copy -f flv "rtmp://host:1935/live/test?key=s3cret"
+```
+
+## HTTP 接口
+
+| 路径 | 说明 |
+| --- | --- |
+| `/` | 仪表盘 |
+| `/flv/{app}/{stream}.flv` | HTTP-FLV 直播流，例如 `/flv/live/test.flv` |
+| `/live/{stream}.flv` | 同上，app 固定为 `live` |
+| `/api/stats` | 服务器与所有流的 JSON 指标 |
+| `/healthz` | 健康检查，返回 `ok` |
+| `/api/streams` | `/api/stats` 的别名 |
+
+```json
+{
+  "uptime_sec": 188,
+  "connections": 3,
+  "stream_count": 1,
+  "live_streams": 1,
+  "total_viewers": 12,
+  "goroutines": 29,
+  "heap_mb": 11.4,
+  "streams": [{
+    "name": "live/test",
+    "live": true,
+    "publisher_addr": "10.0.0.5:52344",
+    "viewers": 12,
+    "bitrate_kbps": 2480,
+    "fps": 30,
+    "gop_cache_kb": 512,
+    "codec_ready": true,
+    "media": {
+      "video_width": 1920, "video_height": 1080,
+      "video_codec": "H.264", "audio_codec": "AAC"
+    }
+  }]
+}
+```
+
+## 自带压测工具
+
+`rtmptest` 在每个合成帧里嵌入墙钟时间，因此不需要任何媒体工具就能测真实单向延迟：
+
+```bash
+# 推 30fps、20KB/帧，持续 30 秒
+./bin/rtmptest -mode push -url rtmp://127.0.0.1:1935/live/test -duration 30s -fps 30
+
+# 单观众，输出延迟分位
+./bin/rtmptest -mode pull -url rtmp://127.0.0.1:1935/live/test -duration 10s
+
+# 500 并发观众
+./bin/rtmptest -mode load -url rtmp://127.0.0.1:1935/live/test -viewers 500 -duration 10s -quiet
+
+# 一条命令：推流 + 20 个观众
+./bin/rtmptest -mode both -url rtmp://127.0.0.1:1935/live/test -viewers 20 -duration 15s
+```
+
+每个观众前 2 秒的延迟样本会被刻意排除：新观众从 GOP 缓存开始播放，本来就会先消化最多一个 GOP 的存量数据。
+
+## 部署
+
+### Linux（systemd）
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin fastrtmp
+sudo install -m 0755 dist/fastrtmp-1.0.0-linux-amd64/fastrtmp /usr/local/bin/fastrtmp
+sudo install -m 0644 deploy/fastrtmp.service /etc/systemd/system/fastrtmp.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now fastrtmp
+sudo journalctl -u fastrtmp -f
+```
+
+防火墙放行 `1935/tcp`（RTMP）和 `8080/tcp`（HTTP）。
+
+### Windows
+
+```bat
+:: 前台直接跑
+fastrtmp.exe -addr :1935 -http :8080
+
+:: 或用 NSSM 注册成服务
+nssm install FastRTMP "C:\fastrtmp\fastrtmp.exe" "-addr :1935 -http :8080 -log-level info"
+nssm start FastRTMP
+```
+
+### Docker
+
+```bash
+docker build -t fastrtmp .
+docker run -d --name fastrtmp -p 1935:1935 -p 8080:8080 fastrtmp
+```
+
+### 反向代理
+
+HTTP-FLV 是长连接 chunked 响应，用 nginx 反代时必须关掉缓冲：
+
+```nginx
+location /flv/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_buffering off;
+    proxy_cache off;
+    chunked_transfer_encoding on;
+    proxy_read_timeout 1h;
+}
+```
+
+## 生产建议
+
+- **单机容量**：单路 5Mbps 的流，1Gbps 网卡理论可撑约 180 路复制输出；CPU 主要消耗在内核网络栈上，
+  `-chunk-size 4096` 可以让系统调用开销保持在低位。
+- **横向扩展**：单机到瓶颈后按流名做一致性哈希分片，前面挂 L4 负载均衡；HTTP-FLV 也方便直接接 CDN。
+- **鉴权**：`-publish-key` 是静态共享密钥，内网或自用足够；公网建议在前面加一层业务鉴权
+  （nginx `auth_request` 或自建 token 校验）。
+- **监控**：轮询 `/api/stats`（接 json_exporter 或自己采集），重点关注 `viewers`、`bitrate_kbps`、
+  `goroutines`、`heap_mb`。
+- **TLS**：没有内置 RTMPS；需要时用 nginx `stream` + `ssl_preread` 或 stunnel 终止 TLS。
+- **不做录制、不做 HLS、不转码**。FastRTMP 是纯中继，需要这些能力请搭配 ffmpeg。
+
+## 目录结构
+
+```
+FastRTMP/
+├── cmd/fastrtmp/           # 服务端入口（参数、横幅、信号处理）
+├── cmd/rtmptest/           # 推流 / 拉流 / 压测客户端
+├── internal/rtmp/
+│   ├── amf0.go             # AMF0 编解码
+│   ├── chunk.go            # RTMP chunk 分块与重组
+│   ├── conn.go             # 连接状态机与命令处理
+│   ├── client.go           # 测试与压测用的 RTMP 客户端
+│   ├── stream.go           # 流注册表、GOP 缓存、观众扇出
+│   ├── server.go           # 监听、统计、生命周期
+│   ├── flv.go              # HTTP-FLV 输出
+│   ├── web.go              # 内嵌仪表盘
+│   └── web/index.html      # 仪表盘页面（中英双语）
+├── deploy/fastrtmp.service # systemd 单元
+├── docs/                   # 截图
+├── Dockerfile
+├── Makefile
+└── build.sh                # 交叉编译发布包
+```
+
+## 协议实现范围
+
+- 握手：RTMP simple handshake（S1/S2 回显 C1）。ffmpeg、OBS 在验证 S1 后会自动回落，已用 ffmpeg 4.x 实测。
+- Chunk：fmt 0/1/2/3、扩展时间戳、分块重组、收发双向 `SetChunkSize`。
+- AMF0：number、boolean、string、object、ECMA array、strict array、null、undefined、date、long string。
+- 命令：`connect`、`releaseStream`、`FCPublish`、`FCUnpublish`、`createStream`、`publish`、`play`、
+  `deleteStream`、`closeStream`、`getStreamLength`、`pause`。
+- 消息：audio、video、data（含 `@setDataFrame`）、aggregate 解包、Window Ack + Acknowledgement。
+- 未实现：RTMPS/RTMPT、HLS/DASH、转码、录制、回看。
+
+## 后续计划
+
+- [ ] 可选 RTMPS 监听
+- [ ] HLS 输出，方便接 CDN
+- [ ] 录制（FLV/MP4 切片）
+- [ ] Prometheus 指标端点
+- [ ] 管理 API（踢推流 / 踢观众）
+- [ ] 复杂（digest）握手，兼容强校验客户端
+
+## 参与贡献
+
+欢迎提 Issue 和 PR。提交前请先跑：
+
+```bash
+gofmt -l .          # 应该没有任何输出
+go vet ./...
+go test ./... -count=1
+```
+
+协议相关代码请保持零依赖，并且每个行为变更都要附测试。
+
+## License
+
+[MIT](LICENSE) © 2026 Hydroxide-OH

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FastRTMP · RTMP Server</title>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.js"></script>
+<style>
+  :root{
+    --bg:#080b10; --panel:#10161f; --panel-2:#151d28; --line:#1f2a37;
+    --text:#e6edf3; --muted:#8b9bb0; --accent:#22d3ee; --accent-2:#34d399;
+    --warn:#fbbf24; --bad:#f87171;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(34,211,238,.12), transparent 60%),
+      radial-gradient(900px 500px at 95% 0%, rgba(52,211,153,.10), transparent 55%),
+      var(--bg);
+    color:var(--text); font:14px/1.55 "Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    min-height:100vh;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:24px}
+  .logo{
+    width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+    background:linear-gradient(140deg,#22d3ee,#0ea5e9 55%,#34d399);
+    color:#04121a;font-weight:800;font-size:11px;letter-spacing:.4px;
+    box-shadow:0 6px 18px rgba(34,211,238,.28);
+  }
+  h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+  h1 span{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px}
+  .spacer{flex:1}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;
+    border:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:12px;
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 4px rgba(52,211,153,.12)}
+  .dot.off{background:var(--bad);box-shadow:0 0 0 4px rgba(248,113,113,.12)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:26px}
+  .card{
+    background:linear-gradient(180deg,rgba(255,255,255,.02),transparent),var(--panel);
+    border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+  }
+  .card .k{color:var(--muted);font-size:12px;letter-spacing:.3px}
+  .card .v{font-size:26px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums}
+  .card .v small{font-size:12px;color:var(--muted);font-weight:400;margin-left:4px}
+  section.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  .panel-head{display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--line)}
+  .panel-head h2{margin:0;font-size:14px;font-weight:600}
+  .panel-head .hint{color:var(--muted);font-size:12px}
+  table{width:100%;border-collapse:collapse}
+  th{
+    text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.7px;
+    color:var(--muted);font-weight:600;padding:11px 18px;background:rgba(255,255,255,.015);
+    border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  td{padding:13px 18px;border-bottom:1px solid rgba(31,42,55,.65);vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  tr:hover td{background:rgba(255,255,255,.018)}
+  .name{font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+  .sub{color:var(--muted);font-size:11.5px;margin-top:3px}
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:7px;font-size:11.5px;
+    background:rgba(52,211,153,.1);color:var(--accent-2);border:1px solid rgba(52,211,153,.22);
+  }
+  .badge.idle{background:rgba(139,155,176,.08);color:var(--muted);border-color:var(--line)}
+  .num{font-variant-numeric:tabular-nums}
+  button{
+    font:inherit;font-size:12.5px;cursor:pointer;border-radius:9px;padding:7px 13px;
+    border:1px solid var(--line);background:var(--panel-2);color:var(--text);transition:.15s;
+  }
+  button:hover{border-color:#2c3d50;background:#1a2431}
+  button.primary{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.35);color:#9be8f5}
+  button.primary:hover{background:rgba(34,211,238,.2)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.lang{padding:6px 11px;font-size:12px;border-radius:999px}
+  .empty{padding:46px 20px;text-align:center;color:var(--muted)}
+  .empty b{display:block;color:var(--text);font-weight:600;margin-bottom:6px;font-size:14px}
+  code{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+    background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:7px;padding:3px 7px;
+  }
+  .foot{margin-top:26px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .box h3{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--text)}
+  .box p{margin:8px 0;color:var(--muted);font-size:12.5px;overflow-wrap:anywhere}
+  .box code{display:inline-block;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
+  .box .row{align-items:flex-start}
+  .box .row{display:flex;align-items:center;gap:8px;margin:7px 0;flex-wrap:wrap}
+  .modal{
+    position:fixed;inset:0;background:rgba(3,6,10,.78);backdrop-filter:blur(6px);
+    display:none;place-items:center;padding:24px;z-index:50;
+  }
+  .modal.on{display:grid}
+  .player{width:min(980px,100%);background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  .player header{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);margin:0}
+  .player header strong{font-size:13px}
+  .player video{width:100%;aspect-ratio:16/9;background:#000;display:block}
+  .player .body{padding:10px 16px 16px;color:var(--muted);font-size:12px}
+  @media (max-width:720px){
+    .foot{grid-template-columns:1fr}
+    th:nth-child(4),td:nth-child(4){display:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">FRT</div>
+    <h1>FastRTMP <span data-i18n="app.sub"></span></h1>
+    <div class="spacer"></div>
+    <button class="lang" id="langBtn" onclick="toggleLang()">中文</button>
+    <div class="pill"><span class="dot" id="statusDot"></span><span id="statusText" data-i18n="status.running"></span></div>
+    <div class="pill"><span data-i18n="uptime"></span> <span id="uptime">-</span></div>
+  </header>
+
+  <div class="cards">
+    <div class="card"><div class="k" data-i18n="card.live"></div><div class="v" id="mStreams">0</div></div>
+    <div class="card"><div class="k" data-i18n="card.viewers"></div><div class="v" id="mViewers">0</div></div>
+    <div class="card"><div class="k" data-i18n="card.bitrate"></div><div class="v" id="mBitrate">0 <small>kbps</small></div></div>
+    <div class="card"><div class="k" data-i18n="card.conns"></div><div class="v" id="mConns">0</div></div>
+    <div class="card"><div class="k" data-i18n="card.mem"></div><div class="v" id="mHeap">0 <small>MB</small></div></div>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2 data-i18n="panel.title"></h2>
+      <span class="hint" id="streamHint"></span>
+      <div class="spacer"></div>
+      <button onclick="load()" data-i18n="btn.refresh"></button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th data-i18n="th.stream"></th>
+          <th data-i18n="th.status"></th>
+          <th data-i18n="th.video"></th>
+          <th data-i18n="th.bitrate"></th>
+          <th data-i18n="th.viewers"></th>
+          <th data-i18n="th.publish"></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="7"><div class="empty" data-i18n="state.loading"></div></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="foot">
+    <div class="box">
+      <h3 data-i18n="push.title"></h3>
+      <p data-i18n="push.server"></p>
+      <div class="row"><code id="pushServer">rtmp://—/live</code><button onclick="copyEl('pushServer', this)" data-i18n="btn.copy"></button></div>
+      <p><span data-i18n="push.key"></span> <code id="pushKey">test</code></p>
+      <p data-i18n="push.ffmpeg"></p>
+      <div class="row"><code id="ffmpegCmd" style="max-width:100%;overflow:auto">ffmpeg -re -i input.mp4 -c copy -f flv rtmp://—/live/test</code></div>
+      <p data-i18n="push.auth"></p>
+    </div>
+    <div class="box">
+      <h3 data-i18n="pull.title"></h3>
+      <p><span data-i18n="pull.rtmp"></span> <code id="playRtmp">rtmp://—/live/test</code></p>
+      <p data-i18n="pull.flv"></p>
+      <div class="row"><code id="playFlv" style="overflow:auto">http://—/flv/live/test.flv</code><button onclick="copyEl('playFlv', this)" data-i18n="btn.copy"></button></div>
+      <p><span data-i18n="pull.ffplay"></span> <code id="ffplayCmd">ffplay -fflags nobuffer http://—/flv/live/test.flv</code></p>
+      <p><span data-i18n="pull.api"></span> <code>/api/stats</code> · <code>/healthz</code></p>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="player">
+    <header>
+      <strong id="modalTitle">Play</strong>
+      <div class="spacer"></div>
+      <button onclick="closePlayer()" data-i18n="btn.close"></button>
+    </header>
+    <video id="video" controls autoplay muted playsinline></video>
+    <div class="body" id="playerMsg"></div>
+  </div>
+</div>
+
+<script>
+const I18N = {
+  en: {
+    'app.sub': 'low latency · high concurrency · single binary',
+    'status.running': 'running',
+    'status.down': 'disconnected',
+    'uptime': 'uptime',
+    'card.live': 'Live streams',
+    'card.viewers': 'Viewers',
+    'card.bitrate': 'Ingest bitrate',
+    'card.conns': 'Connections',
+    'card.mem': 'Memory',
+    'panel.title': 'Streams',
+    'th.stream': 'Stream', 'th.status': 'Status', 'th.video': 'Resolution / codec',
+    'th.bitrate': 'Bitrate', 'th.viewers': 'Viewers', 'th.publish': 'Publish URL',
+    'btn.refresh': 'Refresh', 'btn.copy': 'Copy', 'btn.copied': 'Copied',
+    'btn.preview': 'Preview', 'btn.close': 'Close',
+    'badge.live': 'LIVE', 'badge.idle': 'idle',
+    'hint.stats': '{streams} stream(s) · {conns} total connections · {goroutines} goroutines',
+    'hint.error': 'Cannot reach the server: {err}',
+    'state.loading': 'Loading server status…',
+    'state.empty.title': 'No stream yet',
+    'state.empty.body': 'Publish with OBS or ffmpeg to {url} and it will show up here.',
+    'stream.publisher': 'publisher {addr}',
+    'stream.waiting': 'waiting for publisher',
+    'stream.gop': 'GOP {kb}KB',
+    'stream.total': '{bytes} total · {kf} keyframes',
+    'push.title': 'Publish (OBS / ffmpeg)',
+    'push.server': 'Server:',
+    'push.key': 'Stream key:',
+    'push.ffmpeg': 'ffmpeg example:',
+    'push.auth': 'To require a secret, start with -publish-key <secret> and append ?key=<secret> to the URL.',
+    'pull.title': 'Play',
+    'pull.rtmp': 'RTMP:',
+    'pull.flv': 'HTTP-FLV (lowest latency, plays in browsers via mpegts.js):',
+    'pull.ffplay': 'ffplay:',
+    'pull.api': 'API:',
+    'player.connecting': 'Connecting to {url}',
+    'player.connected': 'Connected (HTTP-FLV)',
+    'player.connectedInfo': 'Connected {res} {vcodec} {acodec} (HTTP-FLV)',
+    'player.unsupported': 'This browser has no MSE support. Play it with: {url}',
+    'player.failed': 'Playback failed: {err}',
+    'player.error': 'Playback error: {type} {detail}',
+    'player.offline': 'Stream stopped publishing, waiting for it to come back…',
+    'time.day': '{n}d ', 'time.hour': '{n}h ', 'time.min': '{n}m ', 'time.sec': '{n}s',
+  },
+  zh: {
+    'app.sub': '低延迟 · 高并发 · 单文件部署',
+    'status.running': '运行中',
+    'status.down': '连接中断',
+    'uptime': '运行',
+    'card.live': '在线直播流',
+    'card.viewers': '观看人数',
+    'card.bitrate': '入流总码率',
+    'card.conns': '当前连接',
+    'card.mem': '运行开销',
+    'panel.title': '直播流',
+    'th.stream': '流名称', 'th.status': '状态', 'th.video': '分辨率 / 编码',
+    'th.bitrate': '码率', 'th.viewers': '观看', 'th.publish': '推流地址',
+    'btn.refresh': '立即刷新', 'btn.copy': '复制', 'btn.copied': '已复制',
+    'btn.preview': '预览', 'btn.close': '关闭',
+    'badge.live': '直播中', 'badge.idle': '空闲',
+    'hint.stats': '{streams} 路流 · {conns} 次累计连接 · {goroutines} 协程',
+    'hint.error': '无法连接服务器：{err}',
+    'state.loading': '正在读取服务器状态…',
+    'state.empty.title': '还没有推流',
+    'state.empty.body': '用 OBS 或 ffmpeg 推到 {url} 即可出现在这里。',
+    'stream.publisher': '推流 {addr}',
+    'stream.waiting': '等待推流',
+    'stream.gop': 'GOP {kb}KB',
+    'stream.total': '共 {bytes} · {kf} 关键帧',
+    'push.title': '推流（OBS / ffmpeg）',
+    'push.server': '服务器地址：',
+    'push.key': '串流密钥：',
+    'push.ffmpeg': 'ffmpeg 示例：',
+    'push.auth': '如需鉴权，启动时加 -publish-key <密钥>，推流地址追加 ?key=<密钥>。',
+    'pull.title': '拉流',
+    'pull.rtmp': 'RTMP：',
+    'pull.flv': 'HTTP-FLV（浏览器 / ffplay，延迟最低）：',
+    'pull.ffplay': 'ffplay：',
+    'pull.api': '接口：',
+    'player.connecting': '正在连接 {url}',
+    'player.connected': '已连接（HTTP-FLV）',
+    'player.connectedInfo': '已连接 {res} {vcodec} {acodec}（HTTP-FLV）',
+    'player.unsupported': '当前浏览器不支持 MSE，可直接用 ffplay 播放：{url}',
+    'player.failed': '播放失败：{err}',
+    'player.error': '播放错误：{type} {detail}',
+    'player.offline': '该流已停止推流，等待重新推流…',
+    'time.day': '{n}天 ', 'time.hour': '{n}小时 ', 'time.min': '{n}分 ', 'time.sec': '{n}秒',
+  }
+};
+
+const $ = (id) => document.getElementById(id);
+const host = location.hostname || "127.0.0.1";
+const httpPort = location.port ? ":" + location.port : "";
+const flvBase = `http://${host}${httpPort}`;
+
+// Priority: ?lang=zh|en override, then saved choice, then browser language.
+const urlLang = new URLSearchParams(location.search).get("lang");
+let lang = (urlLang === "zh" || urlLang === "en") ? urlLang
+  : (localStorage.getItem("fastrtmp.lang")
+    || ((navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en"));
+let player = null;
+let lastStats = null;
+
+function t(key, vars) {
+  let s = (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
+  if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
+  return s;
+}
+function toggleLang() {
+  lang = lang === "zh" ? "en" : "zh";
+  localStorage.setItem("fastrtmp.lang", lang);
+  applyLang();
+  if (lastStats) render(lastStats);
+}
+function applyLang() {
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  $("langBtn").textContent = lang === "zh" ? "EN" : "中文";
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+}
+
+function fmtBytes(n){
+  if (!n) return "0 B";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${u[i]}`;
+}
+function fmtUptime(sec){
+  sec = Math.max(0, sec|0);
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60), s = sec%60;
+  if (d) return t("time.day",{n:d}) + t("time.hour",{n:h});
+  if (h) return t("time.hour",{n:h}) + t("time.min",{n:m});
+  if (m) return t("time.min",{n:m}) + t("time.sec",{n:s});
+  return t("time.sec",{n:s});
+}
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function copyText(text, btn){
+  const done = () => {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = t("btn.copied");
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else fallback();
+  function fallback(){
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); done(); } catch(e) {}
+    document.body.removeChild(ta);
+  }
+}
+function copyEl(id, btn){
+  const el = $(id);
+  copyText(el.textContent.trim(), btn);
+}
+
+async function load(){
+  try {
+    const res = await fetch("/api/stats", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    lastStats = d;
+    render(d);
+    $("statusDot").className = "dot";
+    $("statusText").textContent = t("status.running");
+  } catch (e) {
+    $("statusDot").className = "dot off";
+    $("statusText").textContent = t("status.down");
+    $("streamHint").textContent = t("hint.error", { err: e.message });
+  }
+}
+
+function render(d){
+  $("mStreams").textContent = d.live_streams ?? 0;
+  $("mViewers").textContent = d.total_viewers ?? 0;
+  $("mConns").textContent = d.connections ?? 0;
+  $("mHeap").innerHTML = `${(d.heap_mb ?? 0).toFixed(1)} <small>MB</small>`;
+  $("uptime").textContent = fmtUptime(d.uptime_sec);
+  const totalKbps = (d.streams || []).reduce((a, s) => a + (s.bitrate_kbps || 0), 0);
+  $("mBitrate").innerHTML = `${totalKbps} <small>kbps</small>`;
+  $("streamHint").textContent = t("hint.stats", {
+    streams: d.stream_count || 0,
+    conns: d.total_connections || 0,
+    goroutines: d.goroutines || 0
+  });
+
+  $("pushServer").textContent = `rtmp://${host}:1935/live`;
+  const rows = $("rows");
+  const streams = d.streams || [];
+
+  if (!streams.length) {
+    rows.innerHTML = `<tr><td colspan="7"><div class="empty"><b>${esc(t("state.empty.title"))}</b>` +
+      esc(t("state.empty.body", { url: `rtmp://${host}:1935/live/test` })) + `</div></td></tr>`;
+    return;
+  }
+
+  // Keep the example URLs in sync with the first available stream.
+  const sample = streams.find(s => s.live) || streams[0];
+  const short = sample.name.includes("/") ? sample.name.split("/").slice(1).join("/") : sample.name;
+  $("pushKey").textContent = short;
+  $("ffmpegCmd").textContent = `ffmpeg -re -i input.mp4 -c copy -f flv rtmp://${host}:1935/${sample.name}`;
+  $("playRtmp").textContent = `rtmp://${host}:1935/${sample.name}`;
+  $("playFlv").textContent = `${flvBase}/flv/${sample.name}.flv`;
+  $("ffplayCmd").textContent = `ffplay -fflags nobuffer -flags low_delay ${flvBase}/flv/${sample.name}.flv`;
+
+  rows.innerHTML = streams.map(s => {
+    const res = s.media && s.media.video_width ? `${s.media.video_width}×${s.media.video_height}` : "—";
+    const codec = [s.media?.video_codec, s.media?.audio_codec].filter(Boolean).join(" / ") || "—";
+    const fps = s.media?.video_fps ? ` · ${Number(s.media.video_fps).toFixed(0)}fps` : (s.fps ? ` · ${s.fps}fps` : "");
+    const status = s.live
+      ? `<span class="badge"><span class="dot" style="width:6px;height:6px;box-shadow:none"></span>${esc(t("badge.live"))}</span>`
+      : `<span class="badge idle">${esc(t("badge.idle"))}</span>`;
+    const sub = s.live
+      ? t("stream.publisher", { addr: esc(s.publisher_addr) })
+      : t("stream.waiting");
+    const gop = s.gop_cache_kb ? " · " + t("stream.gop", { kb: s.gop_cache_kb }) : "";
+    return `<tr>
+      <td><div class="name">${esc(s.name)}</div><div class="sub">${sub}${gop}</div></td>
+      <td>${status}</td>
+      <td><div class="num">${res}</div><div class="sub">${esc(codec)}${fps}</div></td>
+      <td class="num">${s.bitrate_kbps ? s.bitrate_kbps + " kbps" : "—"}</td>
+      <td class="num">${s.viewers}</td>
+      <td><div class="sub" style="font-family:ui-monospace,monospace">rtmp://${host}:1935/${esc(s.name)}</div>
+          <div class="sub">${esc(t("stream.total", { bytes: fmtBytes(s.bytes_in), kf: s.keyframes }))}</div></td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="primary" ${s.live ? "" : "disabled"} onclick="playStream('${esc(s.name)}')">${esc(t("btn.preview"))}</button>
+        <button onclick="copyText('rtmp://${host}:1935/${esc(s.name)}', this)">${esc(t("btn.copy"))}</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  if (player && !streams.some(s => s.name === player.key && s.live)) {
+    $("playerMsg").textContent = t("player.offline");
+  }
+}
+
+function playStream(key){
+  $("modal").classList.add("on");
+  $("modalTitle").textContent = key;
+  const url = `${flvBase}/flv/${key}.flv`;
+  $("playerMsg").textContent = t("player.connecting", { url });
+  if (!window.mpegts || !mpegts.isSupported()) {
+    $("playerMsg").textContent = t("player.unsupported", { url });
+    return;
+  }
+  destroyPlayer();
+  const video = $("video");
+  player = { key, url, inst: mpegts.createPlayer({ type: "flv", url, isLive: true, cors: true }, {
+    enableWorker: true, enableStashBuffer: false, stashInitialSize: 128,
+    liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 1.5, liveBufferLatencyMinRemain: 0.2,
+    lazyLoad: false, autoCleanupSourceBuffer: true
+  })};
+  player.inst.attachMediaElement(video);
+  player.inst.load();
+  player.inst.play().then(() => {
+    $("playerMsg").textContent = t("player.connected");
+  }).catch(err => {
+    $("playerMsg").textContent = t("player.failed", { err });
+  });
+  player.inst.on(mpegts.Events.ERROR, (type, detail) => {
+    $("playerMsg").textContent = t("player.error", { type, detail });
+  });
+  player.inst.on(mpegts.Events.MEDIA_INFO, (info) => {
+    const res = info.width && info.height ? `${info.width}×${info.height}` : "";
+    $("playerMsg").textContent = t("player.connectedInfo", {
+      res, vcodec: info.videoCodec || "", acodec: info.audioCodec || ""
+    });
+  });
+}
+
+function destroyPlayer(){
+  if (player && player.inst) {
+    try { player.inst.pause(); player.inst.unload(); player.inst.detachMediaElement(); player.inst.destroy(); } catch(e) {}
+  }
+  player = null;
+}
+function closePlayer(){
+  destroyPlayer();
+  $("modal").classList.remove("on");
+  $("video").removeAttribute("src");
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePlayer(); });
+
+applyLang();
+load();
+setInterval(load, 1000);
+</script>
+</body>
+</html>

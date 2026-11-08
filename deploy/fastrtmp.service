@@ -1,0 +1,32 @@
+[Unit]
+Description=FastRTMP - Low-latency RTMP live server
+Documentation=https://github.com/Hydroxide-OH/FastRTMP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fastrtmp
+Group=fastrtmp
+# Keep secrets out of the process command line.
+# Environment=FASTRTMP_PUBLISH_KEY=change-me
+# Environment=FASTRTMP_PLAY_KEY=
+ExecStart=/usr/local/bin/fastrtmp -addr :1935 -http :8080 -log-level info
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+LimitNPROC=65536
+# The service is network bound; give it a little scheduling preference.
+Nice=-5
+
+# Basic hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
