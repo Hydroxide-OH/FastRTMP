@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Multiple listeners per server. `-addr` and `-http` accept a comma separated list, and each entry
+  may be `public:PORT` or `lan:PORT` to bind the internet-facing or the local network address.
+  `-listen dual` is the one-flag preset for "public + LAN".
+- Public and LAN listeners share one stream registry: they are front doors to the same server,
+  not separate instances.
+- `-public-ip` (explicit, `auto`, or `off`) and `-lan-ip` override address discovery; env
+  fallbacks `FASTRTMP_LISTEN`, `FASTRTMP_PUBLIC_IP`, `FASTRTMP_LAN_IP`.
+- Startup banner now reports public / LAN / loopback URLs plus firewall and port-forwarding hints.
+- Public IP detection races several echo services with a 4 s cap and never blocks startup.
+- LAN address selection prefers the interface carrying the default route and ranks virtual
+  adapters (VirtualBox, VMware, Hyper-V, WSL, Docker) last.
+
+### Fixed
+- A public address that is not on a local NIC (NAT) no longer fails startup: `public:` degrades to
+  a wildcard bind, logs a WARN and points at port forwarding. On a VPS the address is bound exactly.
+- Redundant bindings are dropped when a wildcard listener already covers the port, avoiding
+  `address already in use`.
+
 ### Planned
 - Optional RTMPS listener
 - HLS output

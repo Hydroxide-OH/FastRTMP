@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,8 +24,13 @@ var version = "1.0.0"
 
 func main() {
 	var (
-		addr        = flag.String("addr", ":1935", "RTMP listen address, e.g. :1935")
-		httpAddr    = flag.String("http", ":8080", "HTTP listen address for dashboard + HTTP-FLV, empty disables it")
+		addr = flag.String("addr", ":1935",
+			"RTMP listen address; comma separated list, or use public:PORT / lan:PORT to bind the public and LAN address")
+		httpAddr = flag.String("http", ":8080",
+			"HTTP listen address for dashboard + HTTP-FLV, same syntax as -addr, empty disables it")
+		listenMode  = flag.String("listen", "all", "listen preset: all | dual | public | lan (overrides the host part of -addr/-http)")
+		publicIP    = flag.String("public-ip", "", "public IP used by public: targets and the banner; empty = auto-detect, off = never")
+		lanIP       = flag.String("lan-ip", "", "LAN IP used by lan: targets; empty = pick the first private address")
 		chunkSize   = flag.Int("chunk-size", 4096, "outbound RTMP chunk size in bytes")
 		queueSize   = flag.String("queue", "8MB", "max per-viewer send backlog; on overflow the viewer drops to the next keyframe")
 		gopSize     = flag.String("gop-cache", "4MB", "per-stream GOP cache budget, this is what makes instant playback work")
@@ -47,6 +53,15 @@ func main() {
 	if !isFlagPassed("http") && os.Getenv("FASTRTMP_HTTP") != "" {
 		*httpAddr = os.Getenv("FASTRTMP_HTTP")
 	}
+	if !isFlagPassed("listen") && os.Getenv("FASTRTMP_LISTEN") != "" {
+		*listenMode = os.Getenv("FASTRTMP_LISTEN")
+	}
+	if *publicIP == "" {
+		*publicIP = os.Getenv("FASTRTMP_PUBLIC_IP")
+	}
+	if *lanIP == "" {
+		*lanIP = os.Getenv("FASTRTMP_LAN_IP")
+	}
 	if *publishKey == "" {
 		*publishKey = os.Getenv("FASTRTMP_PUBLISH_KEY")
 	}
@@ -57,6 +72,17 @@ func main() {
 	if *showVersion {
 		fmt.Println("FastRTMP", version)
 		return
+	}
+
+	rtmpSpec, err := applyListenMode(*listenMode, *addr, "1935")
+	if err != nil {
+		fatal("%v", err)
+	}
+	httpSpec := ""
+	if *httpAddr != "" {
+		if httpSpec, err = applyListenMode(*listenMode, *httpAddr, "8080"); err != nil {
+			fatal("%v", err)
+		}
 	}
 
 	queueBytes, err := rtmp.ParseSize(*queueSize)
@@ -70,8 +96,10 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
 	cfg := rtmp.Config{
-		RTMPAddr:         *addr,
-		HTTPAddr:         *httpAddr,
+		RTMPAddr:         rtmpSpec,
+		HTTPAddr:         httpSpec,
+		PublicIP:         *publicIP,
+		LANIP:            *lanIP,
 		ChunkSize:        uint32(*chunkSize),
 		QueueBytes:       queueBytes,
 		GOPCacheBytes:    gopBytes,
@@ -141,33 +169,134 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+// applyListenMode rewrites the host part of a listen specification according to
+// the -listen preset, keeping whatever port was requested.
+//
+//	all     -> unchanged (every interface)
+//	dual    -> public:PORT,lan:PORT
+//	public  -> public:PORT
+//	lan     -> lan:PORT
+func applyListenMode(mode, spec, defaultPort string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "all", "any", "*":
+		return spec, nil
+	case "dual", "both", "public+lan":
+		port := portOfSpec(spec, defaultPort)
+		return "public:" + port + ",lan:" + port, nil
+	case "public", "wan", "internet":
+		return "public:" + portOfSpec(spec, defaultPort), nil
+	case "lan", "local", "private":
+		return "lan:" + portOfSpec(spec, defaultPort), nil
+	}
+	return "", fmt.Errorf("invalid -listen %q (want all, dual, public or lan)", mode)
+}
+
+// portOfSpec pulls the port out of the first entry of a listen specification,
+// whatever form that entry takes.
+func portOfSpec(spec, defaultPort string) string {
+	first := strings.TrimSpace(strings.Split(spec, ",")[0])
+	for _, prefix := range []string{"public:", "lan:", "all:", "*:"} {
+		first = strings.TrimPrefix(strings.ToLower(first), prefix)
+	}
+	if _, p, err := net.SplitHostPort(first); err == nil && p != "" {
+		return p
+	}
+	if strings.HasPrefix(first, ":") && len(first) > 1 {
+		return first[1:]
+	}
+	if _, err := strconv.Atoi(first); err == nil {
+		return first
+	}
+	return defaultPort
+}
+
 func banner(srv *rtmp.Server, hasPubKey, hasPlayKey bool) {
 	rtmpPort := portOf(srv.Addr())
 	httpPort := portOf(srv.HTTPAddr())
-	ips := localIPs()
-	if len(ips) == 0 {
-		ips = []string{"127.0.0.1"}
-	}
-	ip := ips[0]
+	book := srv.Addresses()
 
 	fmt.Printf("\n  FastRTMP v%s  ·  low-latency RTMP server\n", version)
 	fmt.Println("  ─────────────────────────────────────────────────────────")
-	fmt.Printf("  Publish     rtmp://%s:%s/live/{stream}\n", ip, rtmpPort)
-	fmt.Printf("  Play        rtmp://%s:%s/live/{stream}\n", ip, rtmpPort)
-	fmt.Printf("  HTTP-FLV    http://%s:%s/flv/live/{stream}.flv\n", ip, httpPort)
-	fmt.Printf("  Dashboard   http://%s:%s\n", ip, httpPort)
-	fmt.Printf("  Health      http://%s:%s/healthz\n", ip, httpPort)
+	fmt.Printf("  Mode        %s\n", describeListeners(srv))
+	fmt.Printf("  RTMP        :%s  ·  HTTP  :%s\n", rtmpPort, httpPort)
+	fmt.Println()
 
-	if len(ips) > 1 {
-		fmt.Printf("\n  Other interfaces: %s\n", strings.Join(ips[1:], ", "))
+	if book.PublicIP != "" {
+		fmt.Printf("  Public      rtmp://%s:%s/live/{stream}\n", book.PublicIP, rtmpPort)
+		fmt.Printf("              http://%s:%s  (dashboard + /flv/live/{stream}.flv)\n", book.PublicIP, httpPort)
+	} else if book.PublicErr != nil {
+		fmt.Printf("  Public      unavailable (%v)\n", book.PublicErr)
+	}
+	if book.LANIP != "" {
+		fmt.Printf("  LAN         rtmp://%s:%s/live/{stream}\n", book.LANIP, rtmpPort)
+		fmt.Printf("              http://%s:%s\n", book.LANIP, httpPort)
+	}
+	fmt.Printf("  Local       rtmp://127.0.0.1:%s/live/{stream}\n", rtmpPort)
+	fmt.Printf("  Health      http://127.0.0.1:%s/healthz\n", httpPort)
+
+	if extra := extraInterfaces(book); len(extra) > 0 {
+		fmt.Printf("\n  Other interfaces: %s\n", strings.Join(extra, ", "))
+	}
+
+	hints := []string{}
+	if rtmpPort != "-" || httpPort != "-" {
+		hints = append(hints, fmt.Sprintf("Open %s/tcp and %s/tcp in the firewall / cloud security group.", rtmpPort, httpPort))
+	}
+	if book.PublicIP != "" && !book.PublicOnHost {
+		hints = append(hints,
+			fmt.Sprintf("%s is not on a local NIC (you are behind NAT): forward %s/tcp and %s/tcp on the router or cloud gateway.",
+				book.PublicIP, rtmpPort, httpPort))
 	}
 	if hasPubKey {
-		fmt.Println("  Publish auth: enabled (append ?key=<secret> to the URL)")
+		hints = append(hints, "Publish auth is on: append ?key=<secret> to publish URLs.")
 	}
 	if hasPlayKey {
-		fmt.Println("  Playback auth: enabled (append ?key=<secret> to the URL)")
+		hints = append(hints, "Playback auth is on: append ?key=<secret> to play URLs.")
+	}
+	if len(hints) > 0 {
+		fmt.Println("\n  Hints")
+		for _, h := range hints {
+			fmt.Printf("    · %s\n", h)
+		}
 	}
 	fmt.Println()
+}
+
+// describeListeners summarises what is actually bound, which is more honest
+// than echoing the -listen flag: a target that fell back to a wildcard bind
+// says so, instead of pretending it owns a dedicated address.
+func describeListeners(srv *rtmp.Server) string {
+	var parts []string
+	seen := make(map[rtmp.ListenKind]bool)
+	for _, t := range srv.Listeners() {
+		if seen[t.Kind] {
+			continue
+		}
+		seen[t.Kind] = true
+		if t.Kind == rtmp.ListenAll {
+			continue
+		}
+		if t.Wildcard {
+			parts = append(parts, string(t.Kind)+" via all interfaces")
+			continue
+		}
+		parts = append(parts, string(t.Kind))
+	}
+	if len(parts) == 0 {
+		return "all interfaces"
+	}
+	return strings.Join(parts, " + ")
+}
+
+// extraInterfaces lists the local addresses other than the banner's LAN pick.
+func extraInterfaces(book *rtmp.AddressBook) []string {
+	var out []string
+	for _, ip := range book.LANIPs {
+		if ip != book.LANIP && ip != book.PublicIP {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 func portOf(addr string) string {
@@ -178,34 +307,4 @@ func portOf(addr string) string {
 		return p
 	}
 	return addr
-}
-
-// localIPs returns non-loopback IPv4 addresses, most likely LAN first.
-func localIPs() []string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip4 := ipnet.IP.To4()
-			if ip4 == nil || ip4.IsLoopback() {
-				continue
-			}
-			out = append(out, ip4.String())
-		}
-	}
-	return out
 }

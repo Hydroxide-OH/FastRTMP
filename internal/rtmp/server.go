@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,8 +19,19 @@ import (
 
 // Config controls the RTMP ingest server and its auxiliary HTTP endpoints.
 type Config struct {
+	// RTMPAddr is one address or a comma separated list. Besides ordinary
+	// "host:port" entries it accepts the symbolic forms "public:1935" and
+	// "lan:1935", which bind the internet-facing and the local network address
+	// respectively. See ParseListenSpec.
 	RTMPAddr string // ":1935"
-	HTTPAddr string // ":8080", empty disables HTTP
+	// HTTPAddr follows the same rules; empty disables HTTP.
+	HTTPAddr string // ":8080"
+
+	// PublicIP pins the address used by "public:" targets and the startup
+	// banner. Empty means "detect it", "off" disables detection.
+	PublicIP string
+	// LANIP pins the address used by "lan:" targets. Empty means "pick one".
+	LANIP string
 
 	ChunkSize     uint32 // outbound chunk size, 4096 is a good default
 	QueueBytes    int    // per-viewer send backlog before drop-to-keyframe
@@ -62,13 +74,27 @@ func (c *Config) withDefaults() {
 	}
 }
 
-// Server owns the listener, the stream registry and the HTTP surface.
+// boundListener pairs a resolved target with the listener that serves it.
+type boundListener struct {
+	target ListenTarget
+	ln     net.Listener
+}
+
+func (b *boundListener) addr() string { return b.ln.Addr().String() }
+
+// Server owns the listeners, the stream registry and the HTTP surface.
 type Server struct {
 	cfg Config
 	log *slog.Logger
 
-	ln      net.Listener
-	httpSrv *http.Server
+	lns      []*boundListener // RTMP listeners, primary first
+	httpSrvs []*http.Server   // one per HTTP listener, all sharing a handler
+	httpLns  []*boundListener
+
+	pubOnce   sync.Once
+	pubIP     string
+	pubErr    error
+	pubSource string
 
 	mu      sync.RWMutex
 	streams map[string]*Stream
@@ -95,24 +121,21 @@ func New(cfg Config) *Server {
 	}
 }
 
-// Start binds both listeners and returns immediately.
+// Start binds every configured listener and returns immediately.
+//
+// RTMPAddr and HTTPAddr may carry several comma separated entries, so a single
+// server can be exposed on the public interface and on the LAN with different
+// (or identical) ports. Public traffic and LAN traffic reach the same streams:
+// these are just extra front doors, not separate servers.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.cfg.RTMPAddr)
-	if err != nil {
-		return fmt.Errorf("rtmp listen %s: %w", s.cfg.RTMPAddr, err)
+	if err := s.startRTMP(); err != nil {
+		return err
 	}
-	s.ln = ln
-	s.logf("RTMP listening on %s (tcp)", ln.Addr().String())
-
-	go s.acceptLoop()
-
 	if s.cfg.HTTPAddr != "" {
-		hs, err := s.startHTTP()
-		if err != nil {
-			_ = ln.Close()
+		if err := s.startHTTP(); err != nil {
+			s.closeAll()
 			return err
 		}
-		s.httpSrv = hs
 	}
 
 	go s.sampleLoop()
@@ -120,26 +143,158 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Addr returns the bound RTMP address (useful when using :0 in tests).
+func (s *Server) startRTMP() error {
+	book := s.addressBook(specWantsPublic(s.cfg.RTMPAddr))
+	targets, err := ParseListenSpec(s.cfg.RTMPAddr, book, defaultRTMPPort)
+	if err != nil {
+		return fmt.Errorf("rtmp listen: %w", err)
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("rtmp listen: no address configured")
+	}
+
+	for _, t := range targets {
+		bl, err := s.bindTarget(t)
+		if err != nil {
+			s.closeAll()
+			return fmt.Errorf("rtmp listen %s: %w", t.Addr, err)
+		}
+		s.lns = append(s.lns, bl)
+		s.logf("RTMP listening on %s (tcp, %s)", bl.addr(), bl.target.describe())
+	}
+
+	for _, bl := range s.lns {
+		go s.acceptLoop(bl)
+	}
+	return nil
+}
+
+// bindTarget opens one listener. A symbolic target (public:/lan:) degrades to a
+// wildcard bind when the resolved address turns out not to be usable on this
+// host - a NATed public address is the normal case, and it must not stop the
+// server from starting. An explicit address is never rewritten: a typo there is
+// an error worth reporting, not something to paper over.
+func (s *Server) bindTarget(t ListenTarget) (*boundListener, error) {
+	ln, err := net.Listen("tcp", t.Addr)
+	if err == nil {
+		if t.Note != "" {
+			s.log.Warn("listener degraded to all interfaces", "want", t.Kind, "addr", t.Addr, "reason", t.Note)
+		}
+		return &boundListener{target: t, ln: ln}, nil
+	}
+	if t.Kind == ListenExplicit {
+		return nil, err
+	}
+
+	fallback := ListenTarget{
+		Kind:     t.Kind, // keep the intent so logs say "public" was requested
+		Addr:     net.JoinHostPort("", portOfAddr(t.Addr)),
+		Wildcard: true,
+		Note:     err.Error(),
+	}
+	ln2, err2 := net.Listen("tcp", fallback.Addr)
+	if err2 != nil {
+		return nil, err
+	}
+	s.log.Warn("listener degraded to all interfaces", "want", t.Kind, "addr", t.Addr, "reason", err.Error())
+	return &boundListener{target: fallback, ln: ln2}, nil
+}
+
+// Listeners describes the RTMP listeners that were actually bound.
+func (s *Server) Listeners() []ListenTarget {
+	out := make([]ListenTarget, 0, len(s.lns))
+	for _, bl := range s.lns {
+		t := bl.target
+		t.Addr = bl.addr()
+		out = append(out, t)
+	}
+	return out
+}
+
+// HTTPListeners describes the HTTP listeners that were actually bound.
+func (s *Server) HTTPListeners() []ListenTarget {
+	out := make([]ListenTarget, 0, len(s.httpLns))
+	for _, bl := range s.httpLns {
+		t := bl.target
+		t.Addr = bl.addr()
+		out = append(out, t)
+	}
+	return out
+}
+
+// Addr returns the primary RTMP address (useful when using :0 in tests).
 func (s *Server) Addr() string {
-	if s.ln == nil {
+	if len(s.lns) == 0 {
 		return s.cfg.RTMPAddr
 	}
-	return s.ln.Addr().String()
+	return s.lns[0].addr()
 }
 
-// HTTPAddr returns the bound HTTP address.
+// HTTPAddr returns the primary HTTP address.
 func (s *Server) HTTPAddr() string {
-	if s.httpSrv == nil {
+	if len(s.httpLns) == 0 {
 		return ""
 	}
-	return s.httpSrv.Addr
+	return s.httpLns[0].addr()
 }
 
-func (s *Server) acceptLoop() {
+// addressBook resolves the host addresses, looking up the public IP only when
+// the listen spec actually asks for it (or when the caller wants it for the
+// banner). The lookup is cached, so it costs one network round trip at most.
+func (s *Server) addressBook(wantPublic bool) *AddressBook {
+	lanIPs := LocalIPv4s()
+	book := &AddressBook{LANIPs: lanIPs, LANIP: s.cfg.LANIP}
+	if book.LANIP == "" && len(lanIPs) > 0 {
+		book.LANIP = lanIPs[0]
+	}
+
+	if wantPublic || s.cfg.PublicIP != "" {
+		book.PublicIP, book.PublicErr, book.PublicSource = s.publicIP()
+		if book.PublicIP != "" {
+			book.PublicOnHost = book.HasIP(book.PublicIP)
+		}
+	}
+	return book
+}
+
+// Addresses reports where this server is reachable. Local interfaces are
+// described immediately; the public address costs one lookup and is cached
+// unless Config.PublicIP turns detection off.
+func (s *Server) Addresses() *AddressBook {
+	return s.addressBook(true)
+}
+
+func (s *Server) publicIP() (ip string, err error, source string) {
+	s.pubOnce.Do(func() {
+		switch {
+		case publicIPDisabled(s.cfg.PublicIP):
+			s.pubIP, s.pubErr, s.pubSource = "", nil, ""
+		case !autoPublicIP(s.cfg.PublicIP):
+			parsed := net.ParseIP(strings.TrimSpace(s.cfg.PublicIP))
+			if parsed == nil || parsed.To4() == nil {
+				s.pubIP, s.pubSource = "", "flag"
+				s.pubErr = fmt.Errorf("invalid public IP %q", s.cfg.PublicIP)
+				return
+			}
+			s.pubIP, s.pubSource = parsed.To4().String(), "flag"
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), detectPublicTimeout)
+			defer cancel()
+			detected, derr := DetectPublicIPv4(ctx)
+			if derr != nil {
+				s.pubErr = derr
+				return
+			}
+			s.pubIP, s.pubSource = detected, "detected"
+		}
+	})
+	return s.pubIP, s.pubErr, s.pubSource
+}
+
+func (s *Server) acceptLoop(bl *boundListener) {
 	var delay time.Duration
 	for {
-		nc, err := s.ln.Accept()
+		nc, err := bl.ln.Accept()
 		if err != nil {
 			if s.closed.Load() {
 				return
@@ -153,7 +308,7 @@ func (s *Server) acceptLoop() {
 				time.Sleep(delay)
 				continue
 			}
-			s.logf("accept error: %v", err)
+			s.logf("accept error on %s: %v", bl.addr(), err)
 			return
 		}
 		delay = 0
@@ -186,16 +341,30 @@ func (s *Server) connClosed() {
 	s.conns.Add(-1)
 }
 
+// closeAll closes every listener that has been opened so far.
+func (s *Server) closeAll() {
+	for _, bl := range s.lns {
+		_ = bl.ln.Close()
+	}
+	for _, bl := range s.httpLns {
+		_ = bl.ln.Close()
+	}
+}
+
 // Shutdown stops accepting, closes live connections and waits for cleanup.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	s.stopOnce.Do(func() {
 		s.closed.Store(true)
-		if s.ln != nil {
-			err = s.ln.Close()
+		// The first listener's Close error is the one reported to the caller;
+		// the rest are best effort, we are going down either way.
+		for i, bl := range s.lns {
+			if cerr := bl.ln.Close(); cerr != nil && i == 0 {
+				err = cerr
+			}
 		}
-		if s.httpSrv != nil {
-			_ = s.httpSrv.Shutdown(ctx)
+		for _, hs := range s.httpSrvs {
+			_ = hs.Shutdown(ctx)
 		}
 		close(s.done)
 
@@ -398,7 +567,7 @@ func (s *Server) sampleLoop() {
 
 // ---------- HTTP API ----------
 
-func (s *Server) startHTTP() (*http.Server, error) {
+func (s *Server) startHTTP() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/live/", s.handleFLV)
@@ -410,23 +579,45 @@ func (s *Server) startHTTP() (*http.Server, error) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	ln, err := net.Listen("tcp", s.cfg.HTTPAddr)
+	book := s.addressBook(specWantsPublic(s.cfg.HTTPAddr))
+	targets, err := ParseListenSpec(s.cfg.HTTPAddr, book, defaultHTTPPort)
 	if err != nil {
-		return nil, fmt.Errorf("http listen %s: %w", s.cfg.HTTPAddr, err)
+		return fmt.Errorf("http listen: %w", err)
 	}
-	srv := &http.Server{
-		Addr:              ln.Addr().String(),
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		// No WriteTimeout: FLV responses are long lived by design.
-	}
-	s.logf("HTTP listening on %s (dashboard + http-flv)", ln.Addr().String())
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !s.closed.Load() {
-			s.logf("http server stopped: %v", err)
+
+	var listeners []*boundListener
+	for _, t := range targets {
+		bl, err := s.bindTarget(t)
+		if err != nil {
+			for _, prev := range listeners {
+				_ = prev.ln.Close()
+			}
+			return fmt.Errorf("http listen %s: %w", t.Addr, err)
 		}
-	}()
-	return srv, nil
+		listeners = append(listeners, bl)
+	}
+
+	// One http.Server may Serve several listeners at once: the dashboard and
+	// the HTTP-FLV endpoints are therefore reachable on every bound address.
+	for _, bl := range listeners {
+		srv := &http.Server{
+			Addr:    bl.addr(),
+			Handler: mux,
+			// No WriteTimeout: FLV responses are long lived by design.
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		s.httpLns = append(s.httpLns, bl)
+		s.httpSrvs = append(s.httpSrvs, srv)
+		s.logf("HTTP listening on %s (dashboard + http-flv, %s)", bl.addr(), bl.target.describe())
+
+		server := srv
+		go func() {
+			if err := server.Serve(bl.ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !s.closed.Load() {
+				s.logf("http server stopped on %s: %v", bl.addr(), err)
+			}
+		}()
+	}
+	return nil
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,9 @@ Group=fastrtmp
 # Keep secrets out of the process command line.
 # Environment=FASTRTMP_PUBLISH_KEY=change-me
 # Environment=FASTRTMP_PLAY_KEY=
+# Bind the public and the LAN address at once instead of every interface:
+# Environment=FASTRTMP_LISTEN=dual
+# Environment=FASTRTMP_PUBLIC_IP=203.0.113.7
 ExecStart=/usr/local/bin/fastrtmp -addr :1935 -http :8080 -log-level info
 Restart=always
 RestartSec=2

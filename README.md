@@ -40,6 +40,7 @@ dashboard.
 | **HTTP-FLV**         | Play in a browser via mpegts.js, or with `ffplay`, ~0.5–1 s latency, no WebRTC signalling                                                    |
 | **Dashboard**        | Live stream table, bitrate/FPS/resolution, viewer count, in-page preview. Bilingual (EN/中文)                                                  |
 | **Ops**              | `/api/stats`, `/healthz`, optional pprof, `-publish-key` / `-play-key` auth                                                                  |
+| **Listeners**        | Multi-address listen: `-listen dual` opens a public and a LAN door at once; a NATed public IP degrades gracefully with a forwarding hint      |
 | **Deploy**           | Single binary for Linux (amd64/arm64), Windows, macOS; systemd unit, Dockerfile, cross-compile script                                        |
 
 ## Benchmarks
@@ -92,21 +93,59 @@ Cross-compile everything (Linux amd64/arm64, Windows, macOS):
 ### Run
 
 ```bash
-./bin/fastrtmp                    # :1935 RTMP, :8080 HTTP
+./bin/fastrtmp                    # :1935 RTMP, :8080 HTTP, all interfaces
 ./bin/fastrtmp -addr :1935 -http :8080 -log-level info
 ```
 
-The banner prints ready-to-use URLs for every local interface:
+The banner prints ready-to-use public, LAN and loopback URLs:
 
 ```
   FastRTMP v1.0.0  ·  low-latency RTMP server
   ─────────────────────────────────────────────────────────
-  Publish     rtmp://192.168.1.10:1935/live/{stream}
-  Play        rtmp://192.168.1.10:1935/live/{stream}
-  HTTP-FLV    http://192.168.1.10:8080/flv/live/{stream}.flv
-  Dashboard   http://192.168.1.10:8080
-  Health      http://192.168.1.10:8080/healthz
+  Mode        all interfaces
+  RTMP        :1935  ·  HTTP  :8080
+
+  Public      rtmp://203.0.113.7:1935/live/{stream}
+              http://203.0.113.7:8080  (dashboard + /flv/live/{stream}.flv)
+  LAN         rtmp://192.168.1.10:1935/live/{stream}
+              http://192.168.1.10:8080
+  Local       rtmp://127.0.0.1:1935/live/{stream}
+  Health      http://127.0.0.1:8080/healthz
 ```
+
+### Public + LAN listeners
+
+One flag opens the public and the LAN door at the same time:
+
+```bash
+./bin/fastrtmp -listen dual                 # = -addr public:1935,lan:1935
+./bin/fastrtmp -listen dual -addr :1940 -http :8081
+./bin/fastrtmp -addr public:1935,lan:19350  # explicit list, ports may differ
+```
+
+`-addr` and `-http` both take a comma separated list. Each entry is one of:
+
+| Form | Meaning |
+| --- | --- |
+| `:1935`, `1935`, `0.0.0.0:1935` | every interface (the historical behaviour) |
+| `public:1935`, `public` | the internet-facing address, port optional (1935 / 8080) |
+| `lan:1935`, `lan` | the local network address |
+| `192.168.1.10:1935` | that address verbatim, no resolution |
+
+Behaviours worth knowing:
+
+- **A public address that is not on a local NIC degrades instead of failing.** Behind a home
+  router or a 1:1 NAT cloud instance the public IP lives on the gateway, so binding it is
+  impossible. `public:` then falls back to a wildcard bind, logs a WARN and the banner tells you
+  to set up port forwarding. On a VPS, where the public IP is on the interface, it binds exactly.
+- **A wildcard bind on a port wins over specific addresses on the same port** (`:1935,192.168.1.10:1935`
+  keeps only the former), otherwise the kernel returns `address already in use`.
+- **The public and LAN listeners are two doors to one server**: streams, viewers, auth and stats
+  are shared. They are not separate instances.
+- Public IP detection races five echo services with a 4s cap and never blocks startup.
+  Use `-public-ip off` to skip it, or `-public-ip 203.0.113.7` to pin it.
+- The LAN address is taken from the interface carrying the default route; VirtualBox / VMware /
+  Hyper-V / WSL adapters are ranked last so the banner never advertises an unreachable address.
 
 ### Publish
 
@@ -177,8 +216,11 @@ end-to-end on hostile networks, add a WebRTC output — that is out of scope her
 
 | Flag            | Default | Description                                                                           |
 | --------------- | ------- | ------------------------------------------------------------------------------------- |
-| `-addr`         | `:1935` | RTMP listen address (env `FASTRTMP_ADDR`)                                             |
-| `-http`         | `:8080` | HTTP listen address for dashboard + HTTP-FLV; empty disables it (env `FASTRTMP_HTTP`) |
+| `-addr`         | `:1935` | RTMP listen address; comma separated list, `public:` / `lan:` prefixes allowed (env `FASTRTMP_ADDR`) |
+| `-http`         | `:8080` | HTTP listen address for dashboard + HTTP-FLV; same syntax as `-addr`; empty disables it (env `FASTRTMP_HTTP`) |
+| `-listen`       | `all`   | Preset: `all`, `dual` (public + lan), `public`, `lan`; rewrites the host part of `-addr`/`-http`, keeping the port (env `FASTRTMP_LISTEN`) |
+| `-public-ip`    | detect  | Public IP for `public:` targets and the banner; `off` disables detection (env `FASTRTMP_PUBLIC_IP`) |
+| `-lan-ip`       | auto    | LAN IP for `lan:` targets (env `FASTRTMP_LAN_IP`)                                     |
 | `-chunk-size`   | `4096`  | Outbound RTMP chunk size                                                              |
 | `-queue`        | `8MB`   | Max per-viewer send backlog before drop-to-keyframe                                   |
 | `-gop-cache`    | `4MB`   | Per-stream GOP cache budget                                                           |
@@ -274,6 +316,35 @@ sudo journalctl -u fastrtmp -f
 
 Open `1935/tcp` (RTMP) and `8080/tcp` (HTTP) in your firewall.
 
+### Reaching it from the internet
+
+Listening on a public address and being reachable from the internet are two different things.
+The server can only open the sockets; three more steps live outside it:
+
+1. **Host firewall** — `ufw allow 1935/tcp && ufw allow 8080/tcp`, or
+   `firewall-cmd --add-port=1935/tcp --permanent`.
+2. **Cloud security group** — Aliyun/Tencent Cloud/AWS only open 22 by default; add inbound TCP
+   1935 and 8080.
+3. **Port forwarding** — behind a home router or a 1:1 NAT instance the public IP is not on your
+   NIC, so forward 1935 and 8080 to the host's LAN address. `public:` detects this, degrades to a
+   wildcard bind and says so in the banner.
+
+Debug in this order, it tells you which layer is broken:
+
+```bash
+ss -lntp | grep -E '1935|8080'                  # 1. are the sockets open?
+curl -s http://127.0.0.1:8080/healthz           # 2. is the process alive?
+curl -s http://<lan-ip>:8080/healthz            # 3. does the LAN reach it?
+curl -s http://<public-ip>:8080/healthz         # 4. does the internet reach it?
+```
+
+Only step 4 failing while 3 works is always firewall / security group / forwarding - no code change
+needed. If you would rather not expose the dashboard, keep HTTP on loopback:
+
+```bash
+./bin/fastrtmp -addr public:1935,lan:1935 -http 127.0.0.1:8080
+```
+
 ### Windows
 
 ```bat
@@ -332,7 +403,9 @@ FastRTMP/
 │   ├── conn.go             # connection state machine and commands
 │   ├── client.go           # RTMP client used by tests and the load tool
 │   ├── stream.go           # stream registry, GOP cache, viewer fan-out
-│   ├── server.go           # listeners, stats, lifecycle
+│   ├── server.go           # listener binding, stats, lifecycle
+│   ├── listen.go           # listen-address resolution (:port / public: / lan: / lists)
+│   ├── netinfo.go          # interface enumeration, public IP detection
 │   ├── flv.go              # HTTP-FLV output
 │   ├── web.go              # embedded dashboard
 │   └── web/index.html      # dashboard (bilingual)

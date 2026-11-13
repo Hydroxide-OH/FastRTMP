@@ -35,6 +35,7 @@
 | **HTTP-FLV** | 浏览器（mpegts.js）或 ffplay 直接播放，延迟约 0.5–1s，不需要 WebRTC 信令 |
 | **仪表盘** | 流列表、码率/帧率/分辨率、观众数、页内预览，中英双语可切换 |
 | **运维** | `/api/stats`、`/healthz`、可选 pprof、`-publish-key` / `-play-key` 鉴权 |
+| **监听** | 多地址监听：`-listen dual` 一条命令同时开公网口和内网口，公网 IP 被 NAT 时自动降级并提示端口映射 |
 | **部署** | Linux（amd64/arm64）、Windows、macOS 单文件；含 systemd 单元、Dockerfile、交叉编译脚本 |
 
 ## 性能实测
@@ -86,21 +87,62 @@ go build -o bin/fastrtmp ./cmd/fastrtmp          # 或 make build
 ### 启动
 
 ```bash
-./bin/fastrtmp                    # RTMP :1935，HTTP :8080
+./bin/fastrtmp                    # RTMP :1935，HTTP :8080，监听所有网卡
 ./bin/fastrtmp -addr :1935 -http :8080 -log-level info
 ```
 
-启动横幅会打印所有网卡上可直接使用的地址：
+启动横幅会打印公网、内网、本机三个层次可直接使用的地址：
 
 ```
   FastRTMP v1.0.0  ·  low-latency RTMP server
   ─────────────────────────────────────────────────────────
-  Publish     rtmp://192.168.1.10:1935/live/{stream}
-  Play        rtmp://192.168.1.10:1935/live/{stream}
-  HTTP-FLV    http://192.168.1.10:8080/flv/live/{stream}.flv
-  Dashboard   http://192.168.1.10:8080
-  Health      http://192.168.1.10:8080/healthz
+  Mode        all interfaces
+  RTMP        :1935  ·  HTTP  :8080
+
+  Public      rtmp://203.0.113.7:1935/live/{stream}
+              http://203.0.113.7:8080  (dashboard + /flv/live/{stream}.flv)
+  LAN         rtmp://192.168.1.10:1935/live/{stream}
+              http://192.168.1.10:8080
+  Local       rtmp://127.0.0.1:1935/live/{stream}
+  Health      http://127.0.0.1:8080/healthz
+
+  Hints
+    · Open 1935/tcp and 8080/tcp in the firewall / cloud security group.
 ```
+
+### 公网 + 内网双监听
+
+一条命令就能同时开公网口和内网口：
+
+```bash
+./bin/fastrtmp -listen dual                 # = -addr public:1935,lan:1935
+./bin/fastrtmp -listen dual -addr :1940 -http :8081
+./bin/fastrtmp -addr public:1935,lan:19350  # 也可以直接写地址，端口还能不一样
+```
+
+`-addr` / `-http` 都接受逗号分隔的列表，每一项可以是：
+
+| 写法 | 含义 |
+| --- | --- |
+| `:1935`、`1935`、`0.0.0.0:1935` | 所有网卡（历史默认行为） |
+| `public:1935`、`public` | 公网地址，端口可省略（默认 1935 / 8080） |
+| `lan:1935`、`lan` | 内网地址 |
+| `192.168.1.10:1935` | 写死这个地址，不做任何解析 |
+
+几点实现细节，踩过才知道：
+
+- **公网 IP 不在本机网卡上时会自动降级**。家里路由器拨号、云主机做 1:1 NAT 的情况下，
+  公网 IP 属于路由器，本机根本绑不上。此时 `public:` 会退化成 `0.0.0.0:端口` 监听，
+  打一条 WARN 日志并在横幅里提示去做端口映射——不会导致启动失败。
+  VPS 上公网 IP 直接挂在网卡上时，则会严格绑定那个地址。
+- **同一端口上通配监听会覆盖具体地址**。`:1935,192.168.1.10:1935` 只会开出前者，
+  后者会被自动丢弃，否则内核会报 `address already in use`。
+- **公网口和内网口是同一台服务器的两扇门**，流、观众、鉴权、统计完全共享，
+  不是两个实例。谁推的流两扇门都能看。
+- 公网 IP 的探测是并行的（5 个回显服务同时问，4 秒封顶），失败不影响启动；
+  想跳过这次探测用 `-public-ip off`，或直接 `-public-ip 203.0.113.7` 写死。
+- 内网地址默认取默认路由所在的那块物理网卡，VirtualBox / VMware / Hyper-V / WSL
+  这类虚拟网卡会被排到最后，不会让横幅打出一个别人连不上的地址。
 
 ### 推流
 
@@ -163,8 +205,11 @@ RTMP 跑在 TCP 上，网络差的时候会因为重传堆积延迟。如果要�
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-addr` | `:1935` | RTMP 监听地址（环境变量 `FASTRTMP_ADDR`） |
-| `-http` | `:8080` | 仪表盘与 HTTP-FLV 监听地址，留空禁用（环境变量 `FASTRTMP_HTTP`） |
+| `-addr` | `:1935` | RTMP 监听地址，支持逗号分隔多个地址与 `public:` / `lan:` 前缀（环境变量 `FASTRTMP_ADDR`） |
+| `-http` | `:8080` | 仪表盘与 HTTP-FLV 监听地址，语法同 `-addr`，留空禁用（环境变量 `FASTRTMP_HTTP`） |
+| `-listen` | `all` | 监听预设：`all`（所有网卡）、`dual`（公网+内网）、`public`、`lan`；会覆盖 `-addr`/`-http` 的主机部分，端口保留（环境变量 `FASTRTMP_LISTEN`） |
+| `-public-ip` | 自动探测 | 公网 IP，用于 `public:` 目标和横幅；`off` 关闭探测（环境变量 `FASTRTMP_PUBLIC_IP`） |
+| `-lan-ip` | 自动挑选 | 内网 IP，用于 `lan:` 目标（环境变量 `FASTRTMP_LAN_IP`） |
 | `-chunk-size` | `4096` | 出站 RTMP chunk 大小 |
 | `-queue` | `8MB` | 每观众最大发送积压，超出后丢到下一个关键帧 |
 | `-gop-cache` | `4MB` | 每路流 GOP 缓存上限 |
@@ -257,6 +302,33 @@ sudo journalctl -u fastrtmp -f
 
 防火墙放行 `1935/tcp`（RTMP）和 `8080/tcp`（HTTP）。
 
+### 公网访问
+
+先确认一件事：**监听公网 ≠ 公网能进来**。服务端能做的只是把口子打开，剩下三件事在服务端之外：
+
+1. **本机防火墙**：`ufw allow 1935/tcp && ufw allow 8080/tcp`，或 `firewall-cmd --add-port=1935/tcp --permanent`。
+2. **云安全组**：阿里云/腾讯云/AWS 的安全组默认只开 22，得手动放行 1935 和 8080（TCP 入方向）。
+3. **端口映射**：家里路由器拨号、或者云主机是 1:1 NAT 的，公网 IP 不在你机器的网卡上，
+   必须在路由器/云网关做 1935、8080 的端口转发到内网 IP。这种情况 `public:` 会自动降级成
+   `0.0.0.0` 监听并打 WARN，横幅里也会提示。
+
+验证顺序建议这样走，出问题一眼能看出卡在哪一层：
+
+```bash
+ss -lntp | grep -E '1935|8080'                  # 1. 本机端口开没开
+curl -s http://127.0.0.1:8080/healthz           # 2. 服务本身活着吗
+curl -s http://<内网IP>:8080/healthz            # 3. 内网通不通
+curl -s http://<公网IP>:8080/healthz            # 4. 公网映射通不通
+```
+
+只有 4 不通、3 通，那 100% 是防火墙 / 安全组 / 端口映射的问题，不用改代码。
+
+如果 8080 不想暴露在公网，可以只把 RTMP 开出去，HTTP 绑回内网：
+
+```bash
+./bin/fastrtmp -addr public:1935,lan:1935 -http 127.0.0.1:8080
+```
+
 ### Windows
 
 ```bat
@@ -313,7 +385,9 @@ FastRTMP/
 │   ├── conn.go             # 连接状态机与命令处理
 │   ├── client.go           # 测试与压测用的 RTMP 客户端
 │   ├── stream.go           # 流注册表、GOP 缓存、观众扇出
-│   ├── server.go           # 监听、统计、生命周期
+│   ├── server.go           # 多监听绑定、统计、生命周期
+│   ├── listen.go           # 监听地址解析（:port / public: / lan: / 多地址）
+│   ├── netinfo.go          # 网卡枚举、公网 IP 探测
 │   ├── flv.go              # HTTP-FLV 输出
 │   ├── web.go              # 内嵌仪表盘
 │   └── web/index.html      # 仪表盘页面（中英双语）
