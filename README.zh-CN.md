@@ -100,7 +100,7 @@ go build -o bin/fastrtmp ./cmd/fastrtmp          # 或 make build
 启动横幅会打印公网、内网、本机三个层次可直接使用的地址：
 
 ```
-  FastRTMP v1.0.0  ·  low-latency RTMP server
+  FastRTMP v1.1.0  ·  low-latency RTMP server
   ─────────────────────────────────────────────────────────
   Mode        all interfaces
   RTMP        :1935  ·  HTTP  :8080
@@ -110,10 +110,12 @@ go build -o bin/fastrtmp ./cmd/fastrtmp          # 或 make build
   LAN         rtmp://192.168.1.10:1935/live/{stream}
               http://192.168.1.10:8080
   Local       rtmp://127.0.0.1:1935/live/{stream}
+  Dashboard   http://127.0.0.1:8080/  (no password, key editing disabled)
   Health      http://127.0.0.1:8080/healthz
 
   Hints
     · Open 1935/tcp and 8080/tcp in the firewall / cloud security group.
+    · Dashboard has no password: anyone who can reach the HTTP port can read the stats and cannot rotate keys. Add -admin-password <secret> to lock it down.
 ```
 
 ### 公网 + 内网双监听
@@ -356,7 +358,7 @@ FASTRTMP_ADMIN_PASSWORD='your-strong-password' ./fastrtmp -listen dual
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin fastrtmp
-sudo install -m 0755 dist/fastrtmp-1.0.0-linux-amd64/fastrtmp /usr/local/bin/fastrtmp
+sudo install -m 0755 dist/fastrtmp-1.1.0-linux-amd64/fastrtmp /usr/local/bin/fastrtmp
 sudo install -m 0644 deploy/fastrtmp.service /etc/systemd/system/fastrtmp.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now fastrtmp

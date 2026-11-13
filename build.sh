@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 OUT=dist
 rm -rf "$OUT"

@@ -1,5 +1,5 @@
 BINARY  := fastrtmp
-VERSION := 1.0.0
+VERSION := 1.1.0
 LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := CGO_ENABLED=0
 

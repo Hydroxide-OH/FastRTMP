@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-13
 
 ### Added
 - Multiple listeners per server. `-addr` and `-http` accept a comma separated list, and each entry
@@ -70,5 +70,6 @@ First public release.
   could not find a stream published over RTMP.
 - HTTP-FLV clients that disconnected while the stream was idle leaked a connection and a viewer slot.
 
-[Unreleased]: https://github.com/Hydroxide-OH/FastRTMP/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Hydroxide-OH/FastRTMP/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Hydroxide-OH/FastRTMP/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Hydroxide-OH/FastRTMP/releases/tag/v1.0.0
