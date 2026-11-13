@@ -39,6 +39,7 @@ func main() {
 		maxViewers  = flag.Int("max-viewers", 0, "max viewers per stream (0 = unlimited)")
 		publishKey  = flag.String("publish-key", "", "publish secret; publish URLs must carry ?key=...")
 		playKey     = flag.String("play-key", "", "playback secret; play URLs must carry ?key=...")
+		adminPass   = flag.String("admin-password", "", "password for the web dashboard; empty leaves it open and disables key editing")
 		logLevel    = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		pprofAddr   = flag.String("pprof", "", "pprof listen address, e.g. 127.0.0.1:6060")
 		showVersion = flag.Bool("version", false, "print version and exit")
@@ -67,6 +68,15 @@ func main() {
 	}
 	if *playKey == "" {
 		*playKey = os.Getenv("FASTRTMP_PLAY_KEY")
+	}
+	// Environment first for the admin password: command line arguments are
+	// visible to every local user through the process list.
+	if *adminPass == "" {
+		*adminPass = os.Getenv("FASTRTMP_ADMIN_PASSWORD")
+	}
+
+	if err := rtmp.ValidateAdminPassword(*adminPass); err != nil {
+		fatal("invalid -admin-password: %v", err)
 	}
 
 	if *showVersion {
@@ -109,6 +119,8 @@ func main() {
 		MaxSubsPerStream: *maxViewers,
 		PublishKey:       *publishKey,
 		PlayKey:          *playKey,
+		AdminPassword:    *adminPass,
+		Version:          version,
 		Dashboard:        true,
 		Logger:           logger,
 	}
@@ -126,7 +138,7 @@ func main() {
 		}()
 	}
 
-	banner(srv, *publishKey != "", *playKey != "")
+	banner(srv, *adminPass != "")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -210,7 +222,7 @@ func portOfSpec(spec, defaultPort string) string {
 	return defaultPort
 }
 
-func banner(srv *rtmp.Server, hasPubKey, hasPlayKey bool) {
+func banner(srv *rtmp.Server, adminAuth bool) {
 	rtmpPort := portOf(srv.Addr())
 	httpPort := portOf(srv.HTTPAddr())
 	book := srv.Addresses()
@@ -232,6 +244,11 @@ func banner(srv *rtmp.Server, hasPubKey, hasPlayKey bool) {
 		fmt.Printf("              http://%s:%s\n", book.LANIP, httpPort)
 	}
 	fmt.Printf("  Local       rtmp://127.0.0.1:%s/live/{stream}\n", rtmpPort)
+	dashState := "no password, key editing disabled"
+	if adminAuth {
+		dashState = "password protected, keys editable"
+	}
+	fmt.Printf("  Dashboard   http://127.0.0.1:%s/  (%s)\n", httpPort, dashState)
 	fmt.Printf("  Health      http://127.0.0.1:%s/healthz\n", httpPort)
 
 	if extra := extraInterfaces(book); len(extra) > 0 {
@@ -247,11 +264,14 @@ func banner(srv *rtmp.Server, hasPubKey, hasPlayKey bool) {
 			fmt.Sprintf("%s is not on a local NIC (you are behind NAT): forward %s/tcp and %s/tcp on the router or cloud gateway.",
 				book.PublicIP, rtmpPort, httpPort))
 	}
-	if hasPubKey {
-		hints = append(hints, "Publish auth is on: append ?key=<secret> to publish URLs.")
+	if !adminAuth {
+		hints = append(hints, "Dashboard has no password: anyone who can reach the HTTP port can read the stats and cannot rotate keys. Add -admin-password <secret> to lock it down.")
 	}
-	if hasPlayKey {
-		hints = append(hints, "Playback auth is on: append ?key=<secret> to play URLs.")
+	if srv.PublishKey() != "" {
+		hints = append(hints, fmt.Sprintf("Publish auth is on (key length %d): append ?key=<secret> to publish URLs.", len(srv.PublishKey())))
+	}
+	if srv.PlayKey() != "" {
+		hints = append(hints, fmt.Sprintf("Playback auth is on (key length %d): append ?key=<secret> to play URLs.", len(srv.PlayKey())))
 	}
 	if len(hints) > 0 {
 		fmt.Println("\n  Hints")

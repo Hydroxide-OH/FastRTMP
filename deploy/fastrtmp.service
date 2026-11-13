@@ -11,6 +11,12 @@ Group=fastrtmp
 # Keep secrets out of the process command line.
 # Environment=FASTRTMP_PUBLISH_KEY=change-me
 # Environment=FASTRTMP_PLAY_KEY=
+# Dashboard password. Without it the panel is open to anyone who can reach :8080
+# and refuses to edit the stream keys.
+# A strong random value is best kept in a 0600 EnvironmentFile:
+#   /etc/fastrtmp.env  ->  FASTRTMP_ADMIN_PASSWORD=long-random-string
+# EnvironmentFile=-/etc/fastrtmp.env
+# Environment=FASTRTMP_ADMIN_PASSWORD=change-me-too
 # Bind the public and the LAN address at once instead of every interface:
 # Environment=FASTRTMP_LISTEN=dual
 # Environment=FASTRTMP_PUBLIC_IP=203.0.113.7

@@ -46,6 +46,14 @@ type Config struct {
 	PublishKey string // when set, publish URLs must carry ?key=<value>
 	PlayKey    string
 
+	// AdminPassword protects the dashboard. Empty keeps the dashboard open
+	// (the original behaviour) but also disables runtime secret editing: a
+	// passwordless panel must never hand out the publish key.
+	AdminPassword string
+
+	// Version is echoed by /api/config so the dashboard can show it.
+	Version string
+
 	Dashboard bool
 	Logger    *slog.Logger
 }
@@ -87,6 +95,10 @@ type Server struct {
 	cfg Config
 	log *slog.Logger
 
+	// auth gates the dashboard; keys holds secrets the dashboard can rotate.
+	auth *adminAuth
+	keys keyStore
+
 	lns      []*boundListener // RTMP listeners, primary first
 	httpSrvs []*http.Server   // one per HTTP listener, all sharing a handler
 	httpLns  []*boundListener
@@ -112,13 +124,17 @@ type Server struct {
 
 func New(cfg Config) *Server {
 	cfg.withDefaults()
-	return &Server{
+	srv := &Server{
 		cfg:     cfg,
 		log:     cfg.Logger,
 		streams: make(map[string]*Stream),
 		started: time.Now(),
 		done:    make(chan struct{}),
 	}
+	srv.auth = newAdminAuth(cfg.AdminPassword)
+	srv.keys.setPublish(cfg.PublishKey)
+	srv.keys.setPlay(cfg.PlayKey)
+	return srv
 }
 
 // Start binds every configured listener and returns immediately.
@@ -458,19 +474,50 @@ func (s *Server) streamList() []*Stream {
 }
 
 func (s *Server) authorizePublish(query string) bool {
-	if s.cfg.PublishKey == "" {
+	want := s.keys.publish()
+	if want == "" {
 		return true
 	}
 	got := queryValue(query, "key")
-	return subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.PublishKey)) == 1
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func (s *Server) authorizePlay(query string) bool {
-	if s.cfg.PlayKey == "" {
+	want := s.keys.play()
+	if want == "" {
 		return true
 	}
 	got := queryValue(query, "key")
-	return subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.PlayKey)) == 1
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// PublishKey returns the secret a publisher must currently supply, or "" when
+// publishing is open.
+func (s *Server) PublishKey() string { return s.keys.publish() }
+
+// PlayKey returns the secret a player must currently supply, or "" when
+// playback is open.
+func (s *Server) PlayKey() string { return s.keys.play() }
+
+// SetPublishKey rotates the publish secret. An empty value opens publishing to
+// anyone who can reach the port.
+func (s *Server) SetPublishKey(k string) error {
+	if err := ValidateStreamKey(k); err != nil {
+		return err
+	}
+	s.keys.setPublish(k)
+	s.logf("publish key updated (enabled=%t)", k != "")
+	return nil
+}
+
+// SetPlayKey rotates the playback secret.
+func (s *Server) SetPlayKey(k string) error {
+	if err := ValidateStreamKey(k); err != nil {
+		return err
+	}
+	s.keys.setPlay(k)
+	s.logf("play key updated (enabled=%t)", k != "")
+	return nil
 }
 
 // ---------- stats ----------
@@ -519,6 +566,7 @@ func (s *Server) janitorLoop() {
 		case <-s.done:
 			return
 		case <-t.C:
+			s.auth.sweep()
 			now := time.Now()
 			s.mu.RLock()
 			candidates := make([]*Stream, 0, len(s.streams))
@@ -570,13 +618,22 @@ func (s *Server) sampleLoop() {
 func (s *Server) startHTTP() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/login", s.handleLoginPage)
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
+	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
 	mux.HandleFunc("/live/", s.handleFLV)
 	mux.HandleFunc("/flv/", s.handleFLV)
-	mux.HandleFunc("/api/stats", s.handleStats)
-	mux.HandleFunc("/api/streams", s.handleStats)
+	mux.HandleFunc("/api/stats", s.guard(s.handleStats))
+	mux.HandleFunc("/api/streams", s.guard(s.handleStats))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
+	})
+	// The dashboard draws its mark inline, so the browser's automatic favicon
+	// probe only needs a quiet answer instead of a 404 in the console.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	book := s.addressBook(specWantsPublic(s.cfg.HTTPAddr))

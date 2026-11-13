@@ -18,12 +18,24 @@ All notable changes to this project are documented here. The format follows
 - Public IP detection races several echo services with a 4 s cap and never blocks startup.
 - LAN address selection prefers the interface carrying the default route and ranks virtual
   adapters (VirtualBox, VMware, Hyper-V, WSL, Docker) last.
+- Dashboard password: `-admin-password` (env `FASTRTMP_ADMIN_PASSWORD`) puts a login page in
+  front of the panel with a session cookie, five-attempt lockout per IP, and a sign-out button.
+- Key rotation from the dashboard: `/api/config` reads the current settings and rewrites the
+  publish/play key live, no restart required. The panel's example URLs pick up `?key=`
+  automatically, and a "generate" button produces a random one.
+- `/api/login`, `/api/logout`, `/api/config` endpoints. `/api/stats` and the panel itself now
+  require a session when a password is configured.
 
 ### Fixed
 - A public address that is not on a local NIC (NAT) no longer fails startup: `public:` degrades to
   a wildcard bind, logs a WARN and points at port forwarding. On a VPS the address is bound exactly.
 - Redundant bindings are dropped when a wildcard listener already covers the port, avoiding
   `address already in use`.
+- `-play-key` did not guard HTTP-FLV: `/flv/...` served the stream to anyone. It now checks the
+  key like RTMP play does.
+- The startup banner no longer prints the secrets themselves, only whether auth is enabled.
+- Without `-admin-password` the dashboard cannot read or rotate stream keys, so an open panel is
+  not a back door to the ingest secret.
 
 ### Planned
 - Optional RTMPS listener
@@ -31,6 +43,7 @@ All notable changes to this project are documented here. The format follows
 - Recording (FLV/MP4 segmenter)
 - Prometheus metrics endpoint
 - Admin API (kick publisher/viewer)
+- Multiple dashboard accounts instead of one shared password
 - Complex (digest) handshake support
 
 ## [1.0.0] - 2026-11-08

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>FastRTMP · 管理登录</title>
+<style>
+  :root{
+    --bg:#080b10; --panel:#10161f; --panel-2:#151d28; --line:#1f2a37;
+    --text:#e6edf3; --muted:#8b9bb0; --accent:#22d3ee; --accent-2:#34d399; --bad:#f87171;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+    background:
+      radial-gradient(1100px 560px at 12% -10%, rgba(34,211,238,.13), transparent 60%),
+      radial-gradient(820px 460px at 96% 4%, rgba(52,211,153,.10), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font:14px/1.55 "Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .card{
+    width:min(392px,100%);
+    background:linear-gradient(180deg,rgba(255,255,255,.025),transparent),var(--panel);
+    border:1px solid var(--line); border-radius:18px; padding:28px 26px 24px;
+    box-shadow:0 24px 70px rgba(0,0,0,.55);
+  }
+  .brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+  .logo{
+    width:40px;height:40px;border-radius:12px;display:grid;place-items:center;
+    background:linear-gradient(140deg,#22d3ee,#0ea5e9 55%,#34d399);
+    color:#04121a;font-weight:800;font-size:11px;letter-spacing:.4px;
+    box-shadow:0 6px 18px rgba(34,211,238,.28);
+  }
+  h1{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px}
+  h1 small{display:block;font-size:11.5px;font-weight:400;color:var(--muted);letter-spacing:0;margin-top:2px}
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 7px}
+  input{
+    width:100%;font:inherit;font-size:14px;padding:11px 13px;border-radius:10px;
+    border:1px solid var(--line);background:#0b1119;color:var(--text);
+    outline:none;transition:border-color .15s,box-shadow .15s;
+    letter-spacing:.06em;
+  }
+  input:focus{border-color:rgba(34,211,238,.55);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+  button{
+    width:100%;margin-top:16px;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;
+    padding:11px 14px;border-radius:10px;border:1px solid rgba(34,211,238,.35);
+    background:rgba(34,211,238,.13);color:#9be8f5;transition:.15s;
+  }
+  button:hover:not(:disabled){background:rgba(34,211,238,.22)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .msg{min-height:18px;margin-top:12px;font-size:12.5px;color:var(--bad)}
+  .foot{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted);line-height:1.6}
+  .foot code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+    background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:6px;padding:1px 5px}
+</style>
+</head>
+<body>
+<form class="card" id="form" autocomplete="on">
+  <div class="brand">
+    <div class="logo">FRT</div>
+    <h1>FastRTMP 管理面板<small>Admin console</small></h1>
+  </div>
+
+  <label for="pw">管理密码 / Admin password</label>
+  <input id="pw" name="password" type="password" autocomplete="current-password"
+         autofocus spellcheck="false" placeholder="••••••••" />
+  <button type="submit" id="go">登录 / Sign in</button>
+  <div class="msg" id="msg" role="alert"></div>
+
+  <div class="foot">
+    密码在启动时通过 <code>-admin-password</code> 或环境变量
+    <code>FASTRTMP_ADMIN_PASSWORD</code> 设置；忘记后重启服务器即可重置。
+  </div>
+</form>
+
+<script>
+const form = document.getElementById("form");
+const pw = document.getElementById("pw");
+const go = document.getElementById("go");
+const msg = document.getElementById("msg");
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  msg.textContent = "";
+  if (!pw.value) { msg.textContent = "请输入密码 / enter your password"; return; }
+  go.disabled = true;
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw.value }),
+      credentials: "same-origin",
+      cache: "no-store"
+    });
+    if (res.ok) { location.replace("/"); return; }
+    const data = await res.json().catch(() => ({}));
+    msg.textContent = res.status === 429
+      ? "尝试次数过多，请稍后再试 / too many attempts"
+      : (data.error === "wrong password" ? "密码错误 / wrong password" : (data.error || ("HTTP " + res.status)));
+    pw.select();
+  } catch (err) {
+    msg.textContent = "无法连接服务器 / cannot reach the server: " + err.message;
+  } finally {
+    go.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

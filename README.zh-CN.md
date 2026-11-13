@@ -14,6 +14,10 @@
 
 ![FastRTMP 仪表盘](docs/dashboard.zh-CN.png)
 
+加密码后进入面板要先登录：
+
+![登录页](docs/login.png)
+
 ```
                     ┌───────────────────────────────────────────┐
   OBS / ffmpeg      │               FastRTMP                    │      RTMP 播放器 (ffplay/VLC)
@@ -34,6 +38,8 @@
 | **慢客户端保护** | 积压超限的观众被丢到下一个关键帧，绝不拖慢推流端和其他观众 |
 | **HTTP-FLV** | 浏览器（mpegts.js）或 ffplay 直接播放，延迟约 0.5–1s，不需要 WebRTC 信令 |
 | **仪表盘** | 流列表、码率/帧率/分辨率、观众数、页内预览，中英双语可切换 |
+| **管理密码** | `-admin-password` 给面板加登录页；会话 Cookie、失败限流、退出登录；不加密码时面板自动锁死密钥编辑 |
+| **热改推流码** | 面板里直接改推流码 / 播放码，立即生效不用重启，示例 URL 自动带上 `?key=` |
 | **运维** | `/api/stats`、`/healthz`、可选 pprof、`-publish-key` / `-play-key` 鉴权 |
 | **监听** | 多地址监听：`-listen dual` 一条命令同时开公网口和内网口，公网 IP 被 NAT 时自动降级并提示端口映射 |
 | **部署** | Linux（amd64/arm64）、Windows、macOS 单文件；含 systemd 单元、Dockerfile、交叉编译脚本 |
@@ -218,6 +224,7 @@ RTMP 跑在 TCP 上，网络差的时候会因为重传堆积延迟。如果要�
 | `-max-viewers` | `0` | 单路流最大观众数，`0` 不限制 |
 | `-publish-key` | – | 推流鉴权密钥，推流地址需带 `?key=`（环境变量 `FASTRTMP_PUBLISH_KEY`） |
 | `-play-key` | – | 播放鉴权密钥，播放地址需带 `?key=`（环境变量 `FASTRTMP_PLAY_KEY`） |
+| `-admin-password` | – | 管理面板密码；不设则面板开放、且禁止在面板里改密钥（环境变量 `FASTRTMP_ADMIN_PASSWORD`） |
 | `-log-level` | `info` | `debug`、`info`、`warn`、`error` |
 | `-pprof` | – | 开启 pprof，例如 `127.0.0.1:6060` |
 | `-version` | | 打印版本号后退出 |
@@ -230,15 +237,71 @@ RTMP 跑在 TCP 上，网络差的时候会因为重传堆积延迟。如果要�
 ffmpeg -re -i input.mp4 -c copy -f flv "rtmp://host:1935/live/test?key=s3cret"
 ```
 
+## 管理面板与密码
+
+管理面板（`-http` 端口上的 `/`）默认是开放的，方便内网自用。要放到公网，务必加一个密码：
+
+```bash
+./fastrtmp -listen dual -admin-password 'your-strong-password'
+# 或者用环境变量，避免密码出现在 ps 里
+FASTRTMP_ADMIN_PASSWORD='your-strong-password' ./fastrtmp -listen dual
+```
+
+加密码后：
+
+- 访问 `/` 会被跳到登录页（HTTP 401 + 内置表单），密码正确才下发 `fastrtmp_admin` 会话 Cookie；
+- 会话 12 小时滑动过期，Cookie 带 `HttpOnly` + `SameSite=Strict`，HTTPS 下自动加 `Secure`；
+- 同一 IP 连续 5 次密码错误会被锁 30 秒（`429 Too Many Requests`），防止在线爆破；
+- 右上角出现「退出登录」，服务端同步吊销会话；
+- `/api/stats`、`/api/config` 等接口一并受保护，`/healthz` 和 `/flv/` 流地址不受影响
+  （流地址由 `-play-key` 管，见下）。
+
+**不设 `-admin-password` 时**：面板照旧可以看指标，但推流码/播放码会被隐藏且只读，
+`POST /api/config` 直接返回 403。这是刻意的——无密码的面板不能成为泄露推流密钥的后门。
+横幅会明确提示当前处于哪种状态。
+
+![无密码时的锁定状态](docs/dashboard-locked.png)
+
+### 在面板里改推流码
+
+登录后，面板中部「推流 / 播放鉴权」区域可以直接改：
+
+![面板改推流码](docs/dashboard-keys.png)
+
+| 操作 | 效果 |
+| --- | --- |
+| 填推流码 → 保存 | 立即生效，之后推流必须带 `?key=<新码>`，旧码立刻失效 |
+| 填播放码 → 保存 | 立即生效，RTMP 播放与 HTTP-FLV 都要带 `?key=<新码>` |
+| 点「随机生成」 | 填一个 16 位随机码，自己再复制走 |
+| 清空 → 保存 | 关闭该项鉴权，谁都能推/看（公网慎用） |
+
+改完页面上的 ffmpeg 示例、播放地址会自动拼上 `?key=`，直接复制就能用。
+两个码都支持热更新，不需要重启；但**正在推流或观看的连接不会断开**，
+它们保持原会话，新连接才校验新码——画面上的提示也写明了这一点。
+
+密钥不允许包含空格、`?`、`&`、`=`、`#`、`%`、`+`、`/` 等字符（长度上限 128 字节），
+因为它们要安全地放进 URL 查询串；中文等非 ASCII 字符是允许的。
+
+### 会话与安全边界
+
+- 面板**只管管理界面**，不影响 RTMP 推流和 HTTP-FLV 播放；
+- 面板密码不落盘，只存校验哈希（进程内存），重启即重置；
+- 忘记密码就重启进程换一个，没有找回流程——这是服务器，不是网站；
+- 建议面板只监听内网或走 nginx 反代加 HTTPS，而不是把 8080 直接暴露公网。
+
 ## HTTP 接口
 
 | 路径 | 说明 |
 | --- | --- |
-| `/` | 仪表盘 |
-| `/flv/{app}/{stream}.flv` | HTTP-FLV 直播流，例如 `/flv/live/test.flv` |
+| `/` | 管理面板（配置了 `-admin-password` 时需先登录） |
+| `/login` | 登录页 |
+| `/flv/{app}/{stream}.flv` | HTTP-FLV 直播流，例如 `/flv/live/test.flv`（开启 `-play-key` 时需带 `?key=`） |
 | `/live/{stream}.flv` | 同上，app 固定为 `live` |
-| `/api/stats` | 服务器与所有流的 JSON 指标 |
-| `/healthz` | 健康检查，返回 `ok` |
+| `/api/login` | `POST {"password":"…"}` 换取会话 Cookie |
+| `/api/logout` | `POST` 退出并吊销会话 |
+| `/api/config` | `GET` 读取配置；`POST` 热更新推流码/播放码（需登录） |
+| `/api/stats` | 服务器与所有流的 JSON 指标（需登录） |
+| `/healthz` | 健康检查，返回 `ok`，不需要登录 |
 | `/api/streams` | `/api/stats` 的别名 |
 
 ```json
@@ -368,6 +431,9 @@ location /flv/ {
 - **横向扩展**：单机到瓶颈后按流名做一致性哈希分片，前面挂 L4 负载均衡；HTTP-FLV 也方便直接接 CDN。
 - **鉴权**：`-publish-key` 是静态共享密钥，内网或自用足够；公网建议在前面加一层业务鉴权
   （nginx `auth_request` 或自建 token 校验）。
+- **管理面板**：放到公网必须加 `-admin-password`，更稳的做法是让 8080 只听内网
+  （`-http lan:8080`）或只监听回环、前面用 nginx 反代加 HTTPS 和 IP 白名单。
+  面板密码只存在进程内存里，重启即重置，不做持久化。
 - **监控**：轮询 `/api/stats`（接 json_exporter 或自己采集），重点关注 `viewers`、`bitrate_kbps`、
   `goroutines`、`heap_mb`。
 - **TLS**：没有内置 RTMPS；需要时用 nginx `stream` + `ssl_preread` 或 stunnel 终止 TLS。
@@ -388,9 +454,11 @@ FastRTMP/
 │   ├── server.go           # 多监听绑定、统计、生命周期
 │   ├── listen.go           # 监听地址解析（:port / public: / lan: / 多地址）
 │   ├── netinfo.go          # 网卡枚举、公网 IP 探测
-│   ├── flv.go              # HTTP-FLV 输出
-│   ├── web.go              # 内嵌仪表盘
-│   └── web/index.html      # 仪表盘页面（中英双语）
+│   ├── auth.go             # 管理密码、会话、推流/播放密钥存储
+│   ├── flv.go              # HTTP-FLV 输出（校验播放码）
+│   ├── web.go              # 内嵌仪表盘、登录/配置接口
+│   ├── web/index.html      # 仪表盘页面（中英双语，含密钥编辑）
+│   └── web/login.html      # 登录页
 ├── deploy/fastrtmp.service # systemd 单元
 ├── docs/                   # 截图
 ├── Dockerfile
@@ -415,6 +483,7 @@ FastRTMP/
 - [ ] 录制（FLV/MP4 切片）
 - [ ] Prometheus 指标端点
 - [ ] 管理 API（踢推流 / 踢观众）
+- [ ] 多用户 / 多角色面板账号，替代单一共享密码
 - [ ] 复杂（digest）握手，兼容强校验客户端
 
 ## 参与贡献

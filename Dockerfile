@@ -11,4 +11,6 @@ USER fastrtmp
 EXPOSE 1935/tcp 8080/tcp
 ENV FASTRTMP_ADDR=:1935 \
     FASTRTMP_HTTP=:8080
+# Pass -e FASTRTMP_ADMIN_PASSWORD=... at run time to lock the dashboard; without it
+# the panel is open and refuses to edit the publish/play keys.
 ENTRYPOINT ["/usr/local/bin/fastrtmp"]

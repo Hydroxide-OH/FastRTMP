@@ -39,6 +39,8 @@ dashboard.
 | **Slow-client safe** | A backlogged viewer is dropped to the next keyframe; it can never slow down ingest or other viewers                                          |
 | **HTTP-FLV**         | Play in a browser via mpegts.js, or with `ffplay`, ~0.5–1 s latency, no WebRTC signalling                                                    |
 | **Dashboard**        | Live stream table, bitrate/FPS/resolution, viewer count, in-page preview. Bilingual (EN/中文)                                                  |
+| **Admin password**   | `-admin-password` puts a session-based login in front of the panel; rate-limited attempts, sign-out, and key editing disabled when no password is set |
+| **Key rotation**     | Edit the publish/play keys from the panel; applies immediately, example URLs pick up `?key=` automatically                                     |
 | **Ops**              | `/api/stats`, `/healthz`, optional pprof, `-publish-key` / `-play-key` auth                                                                  |
 | **Listeners**        | Multi-address listen: `-listen dual` opens a public and a LAN door at once; a NATed public IP degrades gracefully with a forwarding hint      |
 | **Deploy**           | Single binary for Linux (amd64/arm64), Windows, macOS; systemd unit, Dockerfile, cross-compile script                                        |
@@ -229,6 +231,7 @@ end-to-end on hostile networks, add a WebRTC output — that is out of scope her
 | `-max-viewers`  | `0`     | Max viewers per stream; `0` = unlimited                                               |
 | `-publish-key`  | –       | Require `?key=<secret>` on publish URLs (env `FASTRTMP_PUBLISH_KEY`)                  |
 | `-play-key`     | –       | Require `?key=<secret>` on play URLs (env `FASTRTMP_PLAY_KEY`)                        |
+| `-admin-password` | –     | Dashboard password; unset leaves the panel open and disables key editing (env `FASTRTMP_ADMIN_PASSWORD`) |
 | `-log-level`    | `info`  | `debug`, `info`, `warn`, `error`                                                      |
 | `-pprof`        | –       | Enable pprof, e.g. `127.0.0.1:6060`                                                   |
 | `-version`      |         | Print version and exit                                                                |
@@ -241,15 +244,74 @@ With auth enabled the URL carries the secret:
 ffmpeg -re -i input.mp4 -c copy -f flv "rtmp://host:1935/live/test?key=s3cret"
 ```
 
+## Dashboard password and key rotation
+
+The dashboard on the `-http` port is open by default, which is fine on a trusted LAN.
+Before exposing it to the internet, give it a password:
+
+```bash
+./fastrtmp -listen dual -admin-password 'your-strong-password'
+# or via the environment, so the secret stays out of `ps`
+FASTRTMP_ADMIN_PASSWORD='your-strong-password' ./fastrtmp -listen dual
+```
+
+With a password set:
+
+- `/` answers `401` with an embedded login form until a session cookie is issued;
+- the `fastrtmp_admin` cookie is `HttpOnly` + `SameSite=Strict`, lasts 12h sliding,
+  and gains `Secure` automatically behind TLS;
+- five wrong passwords from one IP lock that IP out for 30s (`429`), which stops
+  online guessing;
+- a "Sign out" button appears, revoking the session server side;
+- `/api/stats` and `/api/config` are protected too — but `/healthz` and the
+  `/flv/` stream paths are not, since those are guarded by `-play-key`.
+
+**Without `-admin-password`** the panel still shows metrics, but the publish and play
+keys are hidden and read-only, and `POST /api/config` returns `403`. That is deliberate:
+a passwordless panel must never become a way to read or rotate the ingest secret.
+The startup banner states which mode is active.
+
+### Editing the stream keys from the panel
+
+Once logged in, the "Stream auth" box edits the secrets in place:
+
+| Action | Effect |
+| --- | --- |
+| Set publish key, save | Applies immediately; publishers must then send `?key=<new>`, the old one stops working |
+| Set play key, save | Applies to both RTMP play and HTTP-FLV |
+| "Generate" | Fills a random 16-char URL-safe key |
+| Clear, save | Turns that check off — anyone may publish/watch (careful on the internet) |
+
+The example ffmpeg and playback URLs on the page pick up `?key=` automatically, so
+they stay copy-pasteable. Both keys hot-reload without a restart, but **live
+connections are not torn down**: existing publishers and viewers keep their session
+and only new connections are checked against the new key — the UI says so too.
+
+Keys may not contain spaces, `?`, `&`, `=`, `#`, `%`, `+` or `/` (max 128 bytes) so they
+can travel safely in a query string; non-ASCII characters such as Chinese are fine.
+
+### Security boundaries
+
+- The panel password guards the **management UI only**; RTMP ingest and HTTP-FLV
+  playback are governed by `-publish-key` / `-play-key`.
+- The password is never written to disk — only its hash, in process memory. Restart
+  to reset it; there is no recovery flow, because this is a server, not a website.
+- Prefer binding the panel to the LAN (`-http lan:8080`) or putting nginx with HTTPS
+  in front, rather than publishing 8080 directly.
+
 ## HTTP API
 
 | Path                      | Description                                     |
 | ------------------------- | ----------------------------------------------- |
-| `/`                       | Dashboard                                       |
-| `/flv/{app}/{stream}.flv` | HTTP-FLV live stream, e.g. `/flv/live/test.flv` |
+| `/`                       | Dashboard (login required when a password is set) |
+| `/login`                  | Login page                                      |
+| `/flv/{app}/{stream}.flv` | HTTP-FLV live stream, e.g. `/flv/live/test.flv` (`?key=` when `-play-key` is set) |
 | `/live/{stream}.flv`      | Same, with `app` implied as `live`              |
-| `/api/stats`              | JSON metrics for the server and every stream    |
-| `/healthz`                | Health probe, returns `ok`                      |
+| `/api/login`              | `POST {"password":"…"}` → session cookie        |
+| `/api/logout`             | `POST` — revoke the session                     |
+| `/api/config`             | `GET` config; `POST` rotates publish/play keys (login required) |
+| `/api/stats`              | JSON metrics for the server and every stream (login required) |
+| `/healthz`                | Health probe, returns `ok`, no login needed     |
 | `/api/streams`            | Alias of `/api/stats`                           |
 
 ```json
@@ -406,9 +468,11 @@ FastRTMP/
 │   ├── server.go           # listener binding, stats, lifecycle
 │   ├── listen.go           # listen-address resolution (:port / public: / lan: / lists)
 │   ├── netinfo.go          # interface enumeration, public IP detection
-│   ├── flv.go              # HTTP-FLV output
-│   ├── web.go              # embedded dashboard
-│   └── web/index.html      # dashboard (bilingual)
+│   ├── auth.go             # admin password, sessions, stream-key store
+│   ├── flv.go              # HTTP-FLV output (checks the play key)
+│   ├── web.go              # embedded dashboard, login and config endpoints
+│   ├── web/index.html      # dashboard (bilingual, edits the stream keys)
+│   └── web/login.html      # login page
 ├── deploy/fastrtmp.service # systemd unit
 ├── docs/                   # screenshots
 ├── Dockerfile

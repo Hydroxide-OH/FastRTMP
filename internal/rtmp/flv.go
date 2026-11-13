@@ -63,6 +63,15 @@ func (s *Server) handleFLV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HTTP-FLV is a playback path, so it honours the play key exactly like
+	// RTMP play does. Without this check -play-key would only protect half the
+	// ways to watch a stream.
+	if !s.authorizePlay(r.URL.RawQuery) {
+		s.logf("http-flv denied stream=%q addr=%s (bad key)", key, r.RemoteAddr)
+		http.Error(w, "invalid play key", http.StatusForbidden)
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

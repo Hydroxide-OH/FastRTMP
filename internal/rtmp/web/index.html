@@ -75,6 +75,22 @@
   button.primary:hover{background:rgba(34,211,238,.2)}
   button:disabled{opacity:.45;cursor:not-allowed}
   button.lang{padding:6px 11px;font-size:12px;border-radius:999px}
+  input[type=text],input[type=password]{
+    flex:1;min-width:0;font:inherit;font-size:12.5px;padding:8px 11px;border-radius:9px;
+    border:1px solid var(--line);background:#0b1119;color:var(--text);outline:none;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  input[type=text]:focus{border-color:rgba(34,211,238,.55);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+  input:disabled{opacity:.45;cursor:not-allowed}
+  .cfg{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:18px}
+  .cfg .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:8px}
+  .cfg .field .row{display:flex;gap:8px}
+  .cfg-foot{padding:0 18px 16px;font-size:12.5px;min-height:18px}
+  .notice{
+    margin:0;padding:13px 18px;font-size:12.5px;color:var(--warn);
+    background:rgba(251,191,36,.055);border-bottom:1px solid var(--line);
+  }
   .empty{padding:46px 20px;text-align:center;color:var(--muted)}
   .empty b{display:block;color:var(--text);font-weight:600;margin-bottom:6px;font-size:14px}
   code{
@@ -100,6 +116,7 @@
   .player .body{padding:10px 16px 16px;color:var(--muted);font-size:12px}
   @media (max-width:720px){
     .foot{grid-template-columns:1fr}
+    .cfg{grid-template-columns:1fr}
     th:nth-child(4),td:nth-child(4){display:none}
   }
 </style>
@@ -111,6 +128,7 @@
     <h1>FastRTMP <span data-i18n="app.sub"></span></h1>
     <div class="spacer"></div>
     <button class="lang" id="langBtn" onclick="toggleLang()">中文</button>
+    <button class="lang" id="logoutBtn" onclick="logout()" data-i18n="btn.logout" style="display:none"></button>
     <div class="pill"><span class="dot" id="statusDot"></span><span id="statusText" data-i18n="status.running"></span></div>
     <div class="pill"><span data-i18n="uptime"></span> <span id="uptime">-</span></div>
   </header>
@@ -146,6 +164,35 @@
         <tr><td colspan="7"><div class="empty" data-i18n="state.loading"></div></td></tr>
       </tbody>
     </table>
+  </section>
+
+  <section class="panel" id="cfgPanel" style="margin-top:22px">
+    <div class="panel-head">
+      <h2 data-i18n="cfg.title"></h2>
+      <span class="hint" data-i18n="cfg.sub"></span>
+      <div class="spacer"></div>
+      <button class="primary" id="cfgSave" onclick="saveConfig(this)" data-i18n="btn.save"></button>
+    </div>
+    <p class="notice" id="cfgNotice" style="display:none" data-i18n="cfg.noAuth"></p>
+    <div class="cfg">
+      <div class="field">
+        <label for="cfgPublishKey" data-i18n="cfg.publish"></label>
+        <div class="row">
+          <input type="text" id="cfgPublishKey" autocomplete="off" spellcheck="false" placeholder="—" />
+          <button onclick="genKey('cfgPublishKey')" data-i18n="btn.generate"></button>
+        </div>
+        <div class="sub" style="margin-top:8px" data-i18n="cfg.publishHint"></div>
+      </div>
+      <div class="field">
+        <label for="cfgPlayKey" data-i18n="cfg.play"></label>
+        <div class="row">
+          <input type="text" id="cfgPlayKey" autocomplete="off" spellcheck="false" placeholder="—" />
+          <button onclick="genKey('cfgPlayKey')" data-i18n="btn.generate"></button>
+        </div>
+        <div class="sub" style="margin-top:8px" data-i18n="cfg.playHint"></div>
+      </div>
+    </div>
+    <div class="cfg-foot"><span id="cfgMsg"></span></div>
   </section>
 
   <div class="foot">
@@ -198,6 +245,16 @@ const I18N = {
     'th.bitrate': 'Bitrate', 'th.viewers': 'Viewers', 'th.publish': 'Publish URL',
     'btn.refresh': 'Refresh', 'btn.copy': 'Copy', 'btn.copied': 'Copied',
     'btn.preview': 'Preview', 'btn.close': 'Close',
+    'btn.save': 'Save', 'btn.generate': 'Generate', 'btn.logout': 'Sign out',
+    'cfg.title': 'Stream auth',
+    'cfg.sub': 'publish key · play key',
+    'cfg.publish': 'Publish key',
+    'cfg.play': 'Play key',
+    'cfg.publishHint': 'Publishers append ?key=… to the URL. Empty = anyone may publish.',
+    'cfg.playHint': 'Viewers append ?key=… to the URL. Empty = anyone may watch.',
+    'cfg.noAuth': 'No dashboard password is set, so the keys are hidden and read-only. Restart with -admin-password <secret> to edit them here.',
+    'cfg.saving': 'Saving…',
+    'cfg.saved': 'Saved. Applies immediately; connected clients must reconnect.',
     'badge.live': 'LIVE', 'badge.idle': 'idle',
     'hint.stats': '{streams} stream(s) · {conns} total connections · {goroutines} goroutines',
     'hint.error': 'Cannot reach the server: {err}',
@@ -212,7 +269,7 @@ const I18N = {
     'push.server': 'Server:',
     'push.key': 'Stream key:',
     'push.ffmpeg': 'ffmpeg example:',
-    'push.auth': 'To require a secret, start with -publish-key <secret> and append ?key=<secret> to the URL.',
+    'push.auth': 'Set or rotate the secret in the panel above (or start with -publish-key <secret>); publish URLs then carry ?key=<secret>.',
     'pull.title': 'Play',
     'pull.rtmp': 'RTMP:',
     'pull.flv': 'HTTP-FLV (lowest latency, plays in browsers via mpegts.js):',
@@ -242,6 +299,16 @@ const I18N = {
     'th.bitrate': '码率', 'th.viewers': '观看', 'th.publish': '推流地址',
     'btn.refresh': '立即刷新', 'btn.copy': '复制', 'btn.copied': '已复制',
     'btn.preview': '预览', 'btn.close': '关闭',
+    'btn.save': '保存', 'btn.generate': '随机生成', 'btn.logout': '退出登录',
+    'cfg.title': '推流 / 播放鉴权',
+    'cfg.sub': '推流码 · 播放码',
+    'cfg.publish': '推流码（publish key）',
+    'cfg.play': '播放码（play key）',
+    'cfg.publishHint': '推流地址需追加 ?key=<推流码>；留空表示任何人都能推流。',
+    'cfg.playHint': '播放地址需追加 ?key=<播放码>；留空表示任何人都能播放。',
+    'cfg.noAuth': '未设置管理密码，密钥已隐藏且只读。用 -admin-password <密码> 重启后即可在此修改。',
+    'cfg.saving': '保存中…',
+    'cfg.saved': '已保存，立即生效；正在推流或观看的客户端需重连。',
     'badge.live': '直播中', 'badge.idle': '空闲',
     'hint.stats': '{streams} 路流 · {conns} 次累计连接 · {goroutines} 协程',
     'hint.error': '无法连接服务器：{err}',
@@ -256,7 +323,7 @@ const I18N = {
     'push.server': '服务器地址：',
     'push.key': '串流密钥：',
     'push.ffmpeg': 'ffmpeg 示例：',
-    'push.auth': '如需鉴权，启动时加 -publish-key <密钥>，推流地址追加 ?key=<密钥>。',
+    'push.auth': '在上方「推流 / 播放鉴权」里可直接设置或更换推流码（也可启动时用 -publish-key <密钥>）；设置后推流地址需追加 ?key=<密钥>。',
     'pull.title': '拉流',
     'pull.rtmp': 'RTMP：',
     'pull.flv': 'HTTP-FLV（浏览器 / ffplay，延迟最低）：',
@@ -285,6 +352,20 @@ let lang = (urlLang === "zh" || urlLang === "en") ? urlLang
     || ((navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en"));
 let player = null;
 let lastStats = null;
+let appCfg = null;   // /api/config: runtime settings the panel may change
+
+// rtmpPort keeps the sample URLs in sync with whatever -addr was used.
+function rtmpPort(){
+  const a = appCfg && appCfg.rtmp_addr;
+  if (!a) return "1935";
+  const i = a.lastIndexOf(":");
+  return i >= 0 ? a.slice(i + 1) : a;
+}
+// keyQS renders "?key=…" for URLs, or "" when that side is not protected.
+function keyQS(kind){
+  const v = appCfg ? (kind === "play" ? appCfg.play_key : appCfg.publish_key) : "";
+  return v ? "?key=" + encodeURIComponent(v) : "";
+}
 
 function t(key, vars) {
   let s = (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
@@ -345,6 +426,7 @@ function copyEl(id, btn){
 async function load(){
   try {
     const res = await fetch("/api/stats", { cache: "no-store" });
+    if (res.status === 401) { location.replace("/login"); return; }
     if (!res.ok) throw new Error("HTTP " + res.status);
     const d = await res.json();
     lastStats = d;
@@ -356,6 +438,74 @@ async function load(){
     $("statusText").textContent = t("status.down");
     $("streamHint").textContent = t("hint.error", { err: e.message });
   }
+}
+
+// loadConfig fetches the editable settings once. When the server runs without
+// -admin-password it hides the secrets and locks the form: a passwordless
+// dashboard must not be able to read or rotate the ingest key.
+async function loadConfig(){
+  try {
+    const res = await fetch("/api/config", { cache: "no-store" });
+    if (res.status === 401) { location.replace("/login"); return; }
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    applyConfig(await res.json());
+  } catch (e) {
+    $("cfgMsg").style.color = "var(--bad)";
+    $("cfgMsg").textContent = t("hint.error", { err: e.message });
+  }
+}
+
+function applyConfig(cfg){
+  appCfg = cfg;
+  $("cfgPublishKey").value = cfg.publish_key || "";
+  $("cfgPlayKey").value = cfg.play_key || "";
+  $("logoutBtn").style.display = cfg.admin_auth ? "" : "none";
+  const locked = !cfg.secrets_visible;
+  $("cfgNotice").style.display = locked ? "" : "none";
+  ["cfgPublishKey", "cfgPlayKey", "cfgSave"].forEach(id => { $(id).disabled = locked; });
+}
+
+async function saveConfig(btn){
+  btn.disabled = true;
+  $("cfgMsg").style.color = "var(--muted)";
+  $("cfgMsg").textContent = t("cfg.saving");
+  try {
+    const res = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        publish_key: $("cfgPublishKey").value.trim(),
+        play_key: $("cfgPlayKey").value.trim()
+      }),
+      cache: "no-store"
+    });
+    if (res.status === 401) { location.replace("/login"); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    applyConfig(data);
+    $("cfgMsg").style.color = "var(--accent-2)";
+    $("cfgMsg").textContent = t("cfg.saved");
+    if (lastStats) render(lastStats);
+    setTimeout(() => { $("cfgMsg").textContent = ""; }, 5000);
+  } catch (e) {
+    $("cfgMsg").style.color = "var(--bad)";
+    $("cfgMsg").textContent = e.message;
+  } finally {
+    btn.disabled = !!(appCfg && !appCfg.secrets_visible);
+  }
+}
+
+// genKey fills a field with a random 16 character key (base36, URL safe).
+function genKey(id){
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  $(id).value = Array.from(bytes, b => alphabet[b % alphabet.length]).join("");
+}
+
+async function logout(){
+  try { await fetch("/api/logout", { method: "POST", cache: "no-store" }); } catch (e) {}
+  location.replace("/login");
 }
 
 function render(d){
@@ -372,13 +522,18 @@ function render(d){
     goroutines: d.goroutines || 0
   });
 
-  $("pushServer").textContent = `rtmp://${host}:1935/live`;
+  $("pushServer").textContent = `rtmp://${host}:${rtmpPort()}/live`;
   const rows = $("rows");
   const streams = d.streams || [];
 
   if (!streams.length) {
+    const demo = `rtmp://${host}:${rtmpPort()}/live/test`;
+    $("ffmpegCmd").textContent = `ffmpeg -re -i input.mp4 -c copy -f flv ${demo}${keyQS("publish")}`;
+    $("playRtmp").textContent = `${demo}${keyQS("play")}`;
+    $("playFlv").textContent = `${flvBase}/flv/live/test.flv${keyQS("play")}`;
+    $("ffplayCmd").textContent = `ffplay -fflags nobuffer -flags low_delay ${flvBase}/flv/live/test.flv${keyQS("play")}`;
     rows.innerHTML = `<tr><td colspan="7"><div class="empty"><b>${esc(t("state.empty.title"))}</b>` +
-      esc(t("state.empty.body", { url: `rtmp://${host}:1935/live/test` })) + `</div></td></tr>`;
+      esc(t("state.empty.body", { url: demo })) + `</div></td></tr>`;
     return;
   }
 
@@ -386,10 +541,10 @@ function render(d){
   const sample = streams.find(s => s.live) || streams[0];
   const short = sample.name.includes("/") ? sample.name.split("/").slice(1).join("/") : sample.name;
   $("pushKey").textContent = short;
-  $("ffmpegCmd").textContent = `ffmpeg -re -i input.mp4 -c copy -f flv rtmp://${host}:1935/${sample.name}`;
-  $("playRtmp").textContent = `rtmp://${host}:1935/${sample.name}`;
-  $("playFlv").textContent = `${flvBase}/flv/${sample.name}.flv`;
-  $("ffplayCmd").textContent = `ffplay -fflags nobuffer -flags low_delay ${flvBase}/flv/${sample.name}.flv`;
+  $("ffmpegCmd").textContent = `ffmpeg -re -i input.mp4 -c copy -f flv rtmp://${host}:${rtmpPort()}/${sample.name}${keyQS("publish")}`;
+  $("playRtmp").textContent = `rtmp://${host}:${rtmpPort()}/${sample.name}${keyQS("play")}`;
+  $("playFlv").textContent = `${flvBase}/flv/${sample.name}.flv${keyQS("play")}`;
+  $("ffplayCmd").textContent = `ffplay -fflags nobuffer -flags low_delay ${flvBase}/flv/${sample.name}.flv${keyQS("play")}`;
 
   rows.innerHTML = streams.map(s => {
     const res = s.media && s.media.video_width ? `${s.media.video_width}×${s.media.video_height}` : "—";
@@ -408,11 +563,11 @@ function render(d){
       <td><div class="num">${res}</div><div class="sub">${esc(codec)}${fps}</div></td>
       <td class="num">${s.bitrate_kbps ? s.bitrate_kbps + " kbps" : "—"}</td>
       <td class="num">${s.viewers}</td>
-      <td><div class="sub" style="font-family:ui-monospace,monospace">rtmp://${host}:1935/${esc(s.name)}</div>
+      <td><div class="sub" style="font-family:ui-monospace,monospace">rtmp://${host}:${rtmpPort()}/${esc(s.name)}${esc(keyQS("publish"))}</div>
           <div class="sub">${esc(t("stream.total", { bytes: fmtBytes(s.bytes_in), kf: s.keyframes }))}</div></td>
       <td style="text-align:right;white-space:nowrap">
         <button class="primary" ${s.live ? "" : "disabled"} onclick="playStream('${esc(s.name)}')">${esc(t("btn.preview"))}</button>
-        <button onclick="copyText('rtmp://${host}:1935/${esc(s.name)}', this)">${esc(t("btn.copy"))}</button>
+        <button onclick="copyText('rtmp://${host}:${rtmpPort()}/${esc(s.name)}${esc(keyQS("publish"))}', this)">${esc(t("btn.copy"))}</button>
       </td>
     </tr>`;
   }).join("");
@@ -425,7 +580,7 @@ function render(d){
 function playStream(key){
   $("modal").classList.add("on");
   $("modalTitle").textContent = key;
-  const url = `${flvBase}/flv/${key}.flv`;
+  const url = `${flvBase}/flv/${key}.flv${keyQS("play")}`;
   $("playerMsg").textContent = t("player.connecting", { url });
   if (!window.mpegts || !mpegts.isSupported()) {
     $("playerMsg").textContent = t("player.unsupported", { url });
@@ -470,6 +625,7 @@ function closePlayer(){
 document.addEventListener("keydown", e => { if (e.key === "Escape") closePlayer(); });
 
 applyLang();
+loadConfig();
 load();
 setInterval(load, 1000);
 </script>
